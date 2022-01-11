@@ -33,7 +33,7 @@
 
 > 结构
 
-​		*任务的id(若为map类型则id为0~files.size-1，若为reduce类型则为分区序号，也就是0~nReduce-1)*
+​		*任务的id(若为map类型则id为0-files.size-1，若为reduce类型则为分区序号，也就是0-nReduce-1)*
 
 - `Id int`
 
