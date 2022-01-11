@@ -25,8 +25,10 @@ type ExampleReply struct {
 type Args struct {
 	//可选参数为task任务(FinishedTask的RPC调用时的参数)
 	Task Task
-	//可选参数为filename(处理后输出的filename,map为中间文件,reduce为最终文件)
+	//可选参数filenames(map任务处理后输出的中间文件filenames)
 	Filenames []string
+	//可选参数filename(reduce任务处理后输出的该分区的最终写入文件filename)
+	Filename string
 }
 
 type Reply struct {

@@ -56,23 +56,23 @@ func Worker(mapf func(string, string) []KeyValue,
 		//成功获取到task
 		log.Println("[worker]: 获取到", task.TaskType, "类型任务:", task.Id)
 		if task.TaskType == "map" {
-			//处理map任务
+			//处理map任务,并获取该map任务输出的中间文件切片
 			filenames := MapWork(task, mapf)
-			task.Filenames = filenames
 			log.Println("[worker]:", task.TaskType, "类型任务:", task.Id, "已完成")
 			//通知coordinator
-			ok := CallForFinishedTask(task)
+			args := &Args{Task: *task, Filenames: filenames}
+			ok := CallForFinishedTask(args)
 			if !ok {
 				log.Fatalf("[worker]: FinishedTask的rpc调用错误,worker结束")
 				return
 			}
 		} else {
-			//reduce任务
+			//reduce任务,并获取最终输出的文件名
 			filename := ReduceWork(task, reducef)
 			log.Println("[worker]:", task.TaskType, "类型任务:", task.Id, "已完成")
 			//通知coordinator
-			task.Filename = filename
-			ok := CallForFinishedTask(task)
+			args := &Args{Task: *task, Filename: filename}
+			ok := CallForFinishedTask(args)
 			if !ok {
 				log.Fatalf("[worker]: FinishedTask的rpc调用错误,worker结束")
 				return
@@ -125,9 +125,6 @@ func MapWork(task *Task, mapFunc func(string, string) []KeyValue) (filenames []s
 			log.Fatalf("encode error: %s", err.Error())
 		}
 	}
-	for _, filename := range filenames {
-		log.Println("[worker]: 产生中间文件", filename)
-	}
 	return filenames
 }
 
@@ -135,9 +132,6 @@ func MapWork(task *Task, mapFunc func(string, string) []KeyValue) (filenames []s
 func ReduceWork(task *Task, reduceFunc func(string, []string) string) (filename string) {
 	//解析传来的目标中间文件
 	filenames := task.Filenames
-	for _, filename := range filenames {
-		log.Println("[worker]: 需要提取文件", filename)
-	}
 	//加载到内存的中间文件中的键值对
 	intermediates := []KeyValue{}
 	for _, filename := range filenames {
@@ -193,10 +187,7 @@ func CallForGetTask() (*Task, bool) {
 	return &reply.Task, ok
 }
 
-func CallForFinishedTask(task *Task) bool {
-	args := &Args{
-		Task: *task,
-	}
+func CallForFinishedTask(args *Args) bool {
 	reply := &Reply{}
 	ok := call("Coordinator.FinishedTask", args, reply)
 	return ok

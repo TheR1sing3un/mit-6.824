@@ -141,7 +141,7 @@ func (c *Coordinator) FinishedTask(args *Args, reply *Reply) error {
 		task.finished()
 		//如果是map任务被完成,则需要创建一个reduce任务,则需要取出传来的中间文件名
 		if task.TaskType == "map" {
-			filenames := args.Task.Filenames
+			filenames := args.Filenames
 			//将文件按照reduce-id分别加到不同的切片中
 			for _, filename := range filenames {
 				split := strings.Split(filename, "-")
@@ -152,7 +152,7 @@ func (c *Coordinator) FinishedTask(args *Args, reply *Reply) error {
 			return nil
 		}
 		//如果是reduce任务被完成,没有额外处理
-		log.Println("[coordinator]: 完成reduce任务:", task.Id, ",输出到文件", taskArg.Filename)
+		log.Println("[coordinator]: 完成reduce任务:", task.Id, ",输出到文件", args.Filename)
 	}
 	log.Println("[coordinator]: 重复的任务完成请求,不做处理,任务:", task.Id)
 	return nil
@@ -255,7 +255,7 @@ func (c *Coordinator) Done() bool {
 	//遍历所有reduce任务
 	for _, task := range c.reduceTasks {
 		if !task.isFinished() {
-			log.Println("[coordinator]: reduce任务", task.Id, "状态为", task.Status)
+			//log.Println("[coordinator]: reduce任务", task.Id, "状态为", task.Status)
 			reduceAllFinished = false
 		}
 	}
