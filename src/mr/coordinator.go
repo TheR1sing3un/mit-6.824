@@ -76,6 +76,16 @@ func (s *Task) free() {
 	s.Status = "free"
 }
 
+//是否是map任务
+func (t *Task) isMapTask() bool {
+	return t.TaskType == "map"
+}
+
+//是否是map任务
+func (t *Task) isReduceTask() bool {
+	return t.TaskType == "reduce"
+}
+
 // Your code here -- RPC handlers for the worker to call.
 
 //分配Task并获取
