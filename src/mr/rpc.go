@@ -22,8 +22,19 @@ type ExampleReply struct {
 	Y int
 }
 
-// Add your RPC definitions here.
+type Args struct {
+	//可选参数为task任务(FinishedTask的RPC调用时的参数)
+	Task Task
+	//可选参数为filename(处理后输出的filename,map为中间文件,reduce为最终文件)
+	Filenames []string
+}
 
+type Reply struct {
+	//可选参数为Task任务
+	Task Task
+}
+
+// Add your RPC definitions here.
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
