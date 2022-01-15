@@ -180,6 +180,7 @@ func ReduceWork(task *Task, reduceFunc func(string, []string) string) (filename 
 	tempFile.Close()
 	return filename
 }
+
 func CallForGetTask() (*Task, bool) {
 	args := &Args{}
 	reply := &Reply{}
