@@ -90,7 +90,10 @@ type Raft struct {
 	matchIndex []int //每台服务器已知的已被复制的最高日志条目索引
 
 	//自定义参数
-	nextWakeUpUnixMill int64 //希望的下次醒来的时间
+	timerHeartBeat   *time.Timer //心跳计时器
+	timerElect       *time.Timer //选举计时器
+	timeoutHeartBeat int         //心跳频率/ms
+	timeoutElect     int         //选举频率/ms
 }
 
 //日志条目
@@ -208,19 +211,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer func() {
 		reply.Term = rf.currentTerm
 	}()
-
 	//1.如果term < currentTerm则直接拒绝并返回
 	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
 		return
-	} //2.如果t > currentTerm,则更新currentTerm,并切换为follower,并且投票
+	}
+	//1.如果t > currentTerm,则更新currentTerm,并切换为follower
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.toFollower()
-		//投票给它
-		reply.VoteGranted = true
-		rf.voteFor = args.CandidateId
-		return
+		rf.voteFor = -1
 	}
 	//3.如果voteFor为空或者为CandidateId,而且日志一样新就投票给他
 	currentLastLogIndex := -1
@@ -232,9 +232,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if (rf.voteFor == -1 || rf.voteFor == args.CandidateId) && currentLastLogIndex == args.LastLogIndex && currentLastLogTerm == args.LastLogTerm {
 		reply.VoteGranted = true
 		rf.voteFor = args.CandidateId
-		return
+		//重置选举时间
+		timeout := rand.Intn(400) + 800
+		rf.timerElect.Reset(time.Duration(timeout) * time.Millisecond)
+		log.Printf("id[%d].state[%v].term[%d]: 重置选举计时器为[%d]ms\n", rf.me, rf.state, rf.currentTerm, timeout)
+
 	}
-	reply.VoteGranted = false
 }
 
 //日志追加RPC的请求参数
@@ -267,7 +270,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 		return
 	}
-
+	//重置选举时间
+	timeout := rand.Intn(400) + 800
+	rf.timerElect.Reset(time.Duration(timeout) * time.Millisecond)
+	log.Printf("id[%d].state[%v].term[%d]: 重置选举计时器为[%d]ms\n", rf.me, rf.state, rf.currentTerm, timeout)
+	if args.Term > rf.currentTerm || rf.state != FOLLOWER {
+		rf.currentTerm = args.Term
+		rf.toFollower()
+	}
+	reply.Success = true
 	//2.日志不匹配
 	currentPrevLogIndex := -1
 	currentPrevLogTerm := -1
@@ -288,14 +299,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//则把接收者的已知已经提交的最高的日志条目的索引commitIndex
 	//重置为 领导人的已知已经提交的最高的日志条目的索引 leaderCommit 或者是 上一个新条目的索引 取两者的最小值
 	//6.判断t > currentTerm,更新currentTerm,成为follower
-	if args.Term > rf.currentTerm {
-		rf.currentTerm = args.Term
-		rf.toFollower()
-	}
-	//7.修改期望醒来时间
-	electionTime := rand.Int63n(300) + 500
-	log.Printf("id[%d].state[%v].term[%d]: 重置超时计时器为 %d ms\n", rf.me, rf.state, rf.currentTerm, electionTime)
-	rf.nextWakeUpUnixMill = time.Now().UnixNano()/1e6 + electionTime
 }
 
 //
@@ -391,45 +394,34 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		rf.mu.Lock()
-		if rf.state == LEADER {
-			rf.mu.Unlock()
-			time.Sleep(400 * time.Millisecond)
-			continue
-		}
-		//不为leader的时候开始计时
-		//随机选举时间(1000-1500毫秒)
-		electionTime := rand.Int63n(300) + 500
-		rf.nextWakeUpUnixMill = time.Now().UnixNano()/1e6 + electionTime
-		rf.mu.Unlock()
-		log.Printf("id[%d].state[%v].term[%d]: sleep %d ms\n", rf.me, rf.state, rf.currentTerm, electionTime)
-		//先睡到预设置的时间
-		time.Sleep(time.Duration(electionTime) * time.Millisecond)
-		for {
-			rf.mu.Lock()
-			log.Printf("id[%d].state[%v].term[%d]: wake up\n", rf.me, rf.state, rf.currentTerm)
-			nwk := rf.nextWakeUpUnixMill
-			rf.mu.Unlock()
-			//如果下次醒来的时间已经过了,则正常超时
-			if nwk <= time.Now().UnixNano()/1e6 {
+		select {
+		case <-rf.timerElect.C:
+			if rf.killed() {
 				break
 			}
-			log.Printf("id[%d].state[%v].term[%d]: continue sleep %d ms\n", rf.me, rf.state, rf.currentTerm, nwk-time.Now().UnixNano()/1e6)
-			//还没过,就继续睡中间的差值
-			time.Sleep(time.Duration(nwk-time.Now().UnixNano()/1e6+rand.Int63n(40)) * time.Millisecond)
-		}
-		//当超时的时候
-		rf.mu.Lock()
-		log.Printf("id[%d].state[%v].term[%d]: 超时\n", rf.me, rf.state, rf.currentTerm)
-		//超时若不为leader
-		if rf.state != LEADER {
+			rf.mu.Lock()
+			log.Printf("id[%d].state[%v].term[%d]: 选举计时器到期\n", rf.me, rf.state, rf.currentTerm)
+			if rf.state != LEADER {
+				//当不为leader时,也就是超时了,那么转变为Candidate
+				go rf.startElection()
+			}
+			//重置选举计时器
+			timeout := rand.Intn(400) + 800
+			rf.timerElect.Reset(time.Duration(timeout) * time.Millisecond)
+			log.Printf("id[%d].state[%v].term[%d]: 重置选举计时器为[%d]ms\n", rf.me, rf.state, rf.currentTerm, timeout)
 			rf.mu.Unlock()
-			//转为候选人
-			rf.toCandidate()
-			//发起选举
-			log.Printf("id[%d].state[%v].term[%d]: 开始选举\n", rf.me, rf.state, rf.currentTerm)
-			go rf.sendVote()
-		} else {
+
+		case <-rf.timerHeartBeat.C:
+			if rf.killed() {
+				break
+			}
+			rf.mu.Lock()
+			if rf.state == LEADER {
+				//当心跳计时器到时间后,如果是Leader就开启心跳检测
+				go rf.startBroadcast()
+			}
+			//重置心跳计时器
+			rf.timerHeartBeat.Reset(time.Duration(rf.timeoutHeartBeat) * time.Millisecond)
 			rf.mu.Unlock()
 		}
 	}
@@ -437,9 +429,10 @@ func (rf *Raft) ticker() {
 }
 
 //发起投票
-func (rf *Raft) sendVote() {
+func (rf *Raft) startElection() {
 	voteCh := make(chan bool, len(rf.peers))
 	rf.mu.Lock()
+	rf.toCandidate()
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -472,9 +465,10 @@ func (rf *Raft) sendVote() {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.toFollower()
+				rf.voteFor = -1
 			}
 			rf.mu.Unlock()
-			log.Printf("id[%d].state[%v].term[%d]: 向 [%d] 申请选票的结果:%v\n", rf.me, rf.state, rf.currentTerm, i, reply.VoteGranted)
+			//log.Printf("id[%d].state[%v].term[%d]: 向 [%d] 申请选票的结果:%v\n", rf.me, rf.state, rf.currentTerm, i, reply.VoteGranted)
 			voteCh <- reply.VoteGranted
 		}(i, args, reply)
 	}
@@ -489,7 +483,11 @@ func (rf *Raft) sendVote() {
 		}
 		if i >= len(rf.peers)/2 {
 			//超过半数成为leader
-			go rf.toLeader()
+			rf.mu.Lock()
+			if rf.state == CANDIDATE {
+				go rf.toLeader()
+			}
+			rf.mu.Unlock()
 			break
 		}
 	}
@@ -521,6 +519,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
+	rf.timeoutHeartBeat = 150
+	rf.timeoutElect = 150
+	rf.timerHeartBeat = time.NewTimer(time.Duration(rf.timeoutHeartBeat) * time.Millisecond)
+	rf.timerElect = time.NewTimer(time.Duration(rf.timeoutElect) * time.Millisecond)
 	log.Printf("id[%d].state[%v].term[%d]: finish init\n", rf.me, rf.state, rf.currentTerm)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -545,10 +547,6 @@ func (rf *Raft) toLeader() {
 	}
 	//初始化matchIndex为0(实例化的时候已经赋值0了,不需要自己再赋值一次了)
 	rf.mu.Unlock()
-	//2.开启一个协程用于发送心跳包
-	log.Printf("id[%d].state[%v].term[%d]: 作为Leader开启一个协程来发心跳包\n", rf.me, rf.state, rf.currentTerm)
-	go rf.sendHeartBeat()
-
 }
 
 //转变为follower
@@ -559,8 +557,6 @@ func (rf *Raft) toFollower() {
 
 //转变为候选人
 func (rf *Raft) toCandidate() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	//切换状态
 	rf.state = CANDIDATE
 	//自增任期号
@@ -570,59 +566,56 @@ func (rf *Raft) toCandidate() {
 	log.Printf("id[%d].state[%v].term[%d]: 变成Candidate\n", rf.me, rf.state, rf.currentTerm)
 }
 
-func (rf *Raft) sendHeartBeat() {
-	for !rf.killed() {
-		rf.mu.Lock()
-		if rf.state == LEADER {
-			log.Printf("id[%d].state[%v].term[%d]: 开始发送一轮心跳包\n", rf.me, rf.state, rf.currentTerm)
-			rf.mu.Unlock()
-			for i := range rf.peers {
-				rf.mu.Lock()
-				if i != rf.me {
-					args := &AppendEntriesArgs{
-						Term:         rf.currentTerm,
-						LeaderId:     rf.me,
-						PrevLogIndex: -1,
-						PrevLogTerm:  -1,
-						Entries:      nil,
-						LeaderCommit: rf.commitIndex,
-					}
-					if len(rf.log) > 0 {
-						args.PrevLogIndex = len(rf.log) - 1
-						args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
-					}
-					//TODO:处理日志落后的server
-					//当该跟随着的nextIndex小于等于leader的lastLogIndex时则发送索引
-					if len(rf.log)-1 >= rf.nextIndex[i] {
-
-					}
-					reply := &AppendEntriesReply{}
-					go func(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
-						//log.Printf("id[%d].state[%v].term[%d]: 发送heartBeat to [%d]\n", rf.me, rf.state, rf.currentTerm, i)
-						ok := rf.sendAppendEntries(i, args, reply)
-						if !ok {
-							//log.Printf("id[%d].state[%v].term[%d]: 发送heartBeat to [%d] error\n", rf.me, rf.state, rf.currentTerm, i)
-							//rf.mu.Unlock()
-							return
-						}
-						rf.mu.Lock()
-						if reply.Term > rf.currentTerm {
-							//修改term
-							rf.currentTerm = reply.Term
-							//转变为follower
-							rf.toFollower()
-						}
-						rf.mu.Unlock()
-					}(i, args, reply)
+func (rf *Raft) startBroadcast() {
+	rf.mu.Lock()
+	if rf.state == LEADER {
+		log.Printf("id[%d].state[%v].term[%d]: 开始发送一轮心跳包\n", rf.me, rf.state, rf.currentTerm)
+		rf.mu.Unlock()
+		for i := range rf.peers {
+			rf.mu.Lock()
+			if i != rf.me {
+				args := &AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: -1,
+					PrevLogTerm:  -1,
+					Entries:      nil,
+					LeaderCommit: rf.commitIndex,
 				}
-				rf.mu.Unlock()
+				if len(rf.log) > 0 {
+					args.PrevLogIndex = len(rf.log) - 1
+					args.PrevLogTerm = rf.log[args.PrevLogIndex].Term
+				}
+				//TODO:处理日志落后的server
+				//当该跟随着的nextIndex小于等于leader的lastLogIndex时则发送索引
+				if len(rf.log)-1 >= rf.nextIndex[i] {
+
+				}
+				reply := &AppendEntriesReply{}
+				go rf.sendHeartBeat(i, args, reply)
 			}
-			//0.1秒一次心跳检测
-			time.Sleep(100 * time.Millisecond)
-		} else {
 			rf.mu.Unlock()
 		}
+	} else {
+		rf.mu.Unlock()
 	}
+}
+func (rf *Raft) sendHeartBeat(i int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	//log.Printf("id[%d].state[%v].term[%d]: 发送heartBeat to [%d]\n", rf.me, rf.state, rf.currentTerm, i)
+	ok := rf.sendAppendEntries(i, args, reply)
+	if !ok {
+		//log.Printf("id[%d].state[%v].term[%d]: 发送heartBeat to [%d] error\n", rf.me, rf.state, rf.currentTerm, i)
+		//rf.mu.Unlock()
+		return
+	}
+	rf.mu.Lock()
+	if reply.Term > rf.currentTerm {
+		//修改term
+		rf.currentTerm = reply.Term
+		//转变为follower
+		rf.toFollower()
+	}
+	rf.mu.Unlock()
 }
 
 //处理不一致的日志
