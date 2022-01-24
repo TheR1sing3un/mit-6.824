@@ -295,11 +295,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//开始日志同步
 	//如果一个已经存在的条目和新条目(即刚刚接收到的日志条目)发生了冲突(因为索引相同，任期不同),那么就删除这个已经存在的条目以及它之后的所有条目
+	log.Printf("id[%d].state[%v].term[%d]: 此时已有的log=[%v]\n", rf.me, rf.state, rf.currentTerm, rf.log)
 	for i := 0; i < len(args.Entries); i++ {
-		if len(rf.log)-1 > args.PrevLogIndex && rf.log[args.PrevLogIndex+1+i].Term != args.Entries[i].Term {
+		if len(rf.log)-1 > args.PrevLogIndex+i && rf.log[args.PrevLogIndex+1+i].Term != args.Entries[i].Term {
 			rf.log = rf.log[:args.PrevLogIndex+1+i]
-			log.Printf("id[%d].state[%v].term[%d]: index[%d]处日志的Term[%d]和新日志entries[%d]的Term[%d]不匹配,删除index[%d]及其以后的log\n",
-				rf.me, rf.state, rf.currentTerm, args.PrevLogIndex+1+i, rf.log[args.PrevLogIndex+1+i].Term, i, args.Entries[i].Term, args.PrevLogIndex+1+i)
+			log.Printf("id[%d].state[%v].term[%d]: index[%d]处日志的Term新日志entries[%d]的Term[%d]不匹配,删除index[%d]及其以后的log\n",
+				rf.me, rf.state, rf.currentTerm, args.PrevLogIndex+1+i, i, args.Entries[i].Term, args.PrevLogIndex+1+i)
 		}
 	}
 
