@@ -699,7 +699,7 @@ func (rf *Raft) handleAppendEntries(server int) {
 	}
 	log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
 	reply := AppendEntriesReply{}
-	//targetNextIndex := rf.nextIndex[server] + len(args.Entries)
+	targetNextIndex := rf.nextIndex[server] + len(args.Entries)
 	rf.mu.Unlock()
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	rf.mu.Lock()
@@ -729,24 +729,18 @@ func (rf *Raft) handleAppendEntries(server int) {
 	}
 	//若返回成功
 	//更新nextIndex和matchIndex
-	if len(args.Entries) > 0 {
-		rf.matchIndex[server] = len(rf.log) - 1
-		rf.nextIndex[server] = rf.matchIndex[server] + 1
-		log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]成功,nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
-	}
-
 	//if len(args.Entries) > 0 {
 	//	rf.matchIndex[server] = len(rf.log) - 1
 	//	rf.nextIndex[server] = rf.matchIndex[server] + 1
 	//	log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]成功,nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
 	//}
 
-	//if len(args.Entries) > 0 {
-	//	if targetNextIndex > rf.nextIndex[server] {
-	//		rf.nextIndex[server] = targetNextIndex
-	//		rf.matchIndex[server] = targetNextIndex - 1
-	//	}
-	//}
+	if len(args.Entries) > 0 {
+		if targetNextIndex > rf.nextIndex[server] {
+			rf.nextIndex[server] = targetNextIndex
+			rf.matchIndex[server] = targetNextIndex - 1
+		}
+	}
 	//
 	//if len(args.Entries) > 0 {
 	//	rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
