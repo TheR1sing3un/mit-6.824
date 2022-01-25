@@ -255,6 +255,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  //接收者的currentTerm
 	Success bool //如果prevLogIndex和prevLogTerm和follower的匹配则返回true
+	XTerm   int  //若follower和leader的日志冲突,则记载的是follower的log在preLogIndex处的term,若preLogIndex处无日志,返回-1
+	XIndex  int  //follower中的log里term为XTerm的第一条log的index
+	XLen    int  //当XTerm为-1时,此时XLen记录follower的日志长度(不包含初始占位日志)
 }
 
 //日志追加的RPC handler
@@ -267,7 +270,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true
 	log.Printf("id[%d].state[%v].term[%d]: 接收到[%d],term[%d]的日志追加,preLogIndex = [%d], preLogTerm = [%d],entries = [%v]\n", rf.me, rf.state, rf.currentTerm, args.LeaderId, args.Term, args.PrevLogIndex, args.PrevLogTerm, args.Entries)
 	log.Printf("id[%d].state[%v].term[%d]: 此时已有的log=[%v]\n", rf.me, rf.state, rf.currentTerm, rf.log)
-	//1.判断term是否小于当前任期
+	//判断term是否小于当前任期
 	if args.Term < rf.currentTerm {
 		log.Printf("id[%d].state[%v].term[%d]: 追加日志的任期%d小于当前任期%d\n", rf.me, rf.state, rf.currentTerm, args.Term, rf.currentTerm)
 		reply.Success = false
@@ -277,10 +280,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	timeout := rand.Intn(300) + rf.timeoutElect
 	rf.timerElect.Reset(time.Duration(timeout) * time.Millisecond)
 	log.Printf("id[%d].state[%v].term[%d]: 重置选举计时器为[%d]ms\n", rf.me, rf.state, rf.currentTerm, timeout)
-	//if args.Term > rf.currentTerm || rf.state != FOLLOWER {
-	//	rf.currentTerm = args.Term
-	//	rf.toFollower()
-	//}
 	//更新currentTerm
 	rf.currentTerm = args.Term
 	//转变为follower
@@ -289,11 +288,34 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//进行日志一致性判断
 	//若leader的日志不为空而且此时follower中该prevLogIndex处的日志的term和leader的prevLogTerm不等则日志不匹配
-	if len(rf.log)-1 < args.PrevLogIndex || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
-		log.Printf("id[%d].state[%v].term[%d]: 追加日志的和现在的日志不匹配\n", rf.me, rf.state, rf.currentTerm)
+	//if len(rf.log)-1 < args.PrevLogIndex || args.PrevLogTerm != rf.log[args.PrevLogIndex].Term {
+	//	log.Printf("id[%d].state[%v].term[%d]: 追加日志的和现在的日志不匹配\n", rf.me, rf.state, rf.currentTerm)
+	//	reply.Success = false
+	//	return
+	//}
+
+	//进行日志一致性判断(快速恢复)
+	//若leader在preLogIndex处没有日志
+	if len(rf.log)-1 < args.PrevLogIndex {
 		reply.Success = false
+		//preLogIndex处无日志,记录XTerm为-1
+		reply.XTerm = -1
+		//记录XLen为日志的长度(不包含初始占位日志)
+		reply.XLen = len(rf.log) - 1
+		log.Printf("id[%d].state[%v].term[%d]: 追加日志的和现在的日志不匹配\n", rf.me, rf.state, rf.currentTerm)
 		return
 	}
+	//若preLogIndex处的日志的term和preLogTerm不相等
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Success = false
+		//更新XTerm为冲突的Term
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+		//更新XIndex为XTerm在本机log中第一个Index位置
+		reply.XIndex = rf.binaryFindFirstIndexByTerm(reply.XTerm)
+		log.Printf("id[%d].state[%v].term[%d]: 追加日志的和现在的日志不匹配\n", rf.me, rf.state, rf.currentTerm)
+		return
+	}
+
 	//开始日志同步
 	//如果一个已经存在的条目和新条目(即刚刚接收到的日志条目)发生了冲突(因为索引相同，任期不同),那么就删除这个已经存在的条目以及它之后的所有条目
 	for i := 0; i < len(args.Entries); i++ {
@@ -325,6 +347,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+}
+
+//二分查找目标term的第一个log的index(寻找左边界)
+func (rf *Raft) binaryFindFirstIndexByTerm(term int) int {
+	left := 1
+	right := len(rf.log) - 1
+	for left <= right {
+		mid := left + (right-left)/2
+		if rf.log[mid].Term < term {
+			left = mid + 1
+		} else if rf.log[mid].Term > term {
+			right = mid - 1
+		} else {
+			//为了寻找左边界,这里仍然将移动右指针
+			right = mid - 1
+		}
+	}
+	//检查越界和没有找到的情况
+	if left >= len(rf.log) || rf.log[left].Term != term {
+		return -1
+	}
+	return left
 }
 
 //
@@ -720,30 +764,27 @@ func (rf *Raft) handleAppendEntries(server int) {
 			return
 		}
 		//若不是因为任期拒绝则是因为日志不匹配
-		//则递减nextIndex
+		//更新nextIndex
 		if len(args.Entries) > 0 {
-			rf.nextIndex[server]--
-			log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]失败,nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
+			//当follower的preLogIndex处无日志时
+			if reply.XTerm == -1 {
+				//更新nextIndex为follower的最后一条日志的下一个位置
+				rf.nextIndex[server] = reply.XLen + 1
+			} else {
+				//当preLogIndex处的日志任期冲突时
+				//更新nextIndex为该冲突任期的第一条日志的位置,为了直接覆盖冲突的任期的所有的日志
+				rf.nextIndex[server] = reply.XIndex
+			}
+			log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]失败,更新nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
 		}
 		return
 	}
-	//若返回成功
-	//更新nextIndex和matchIndex
-	//if len(args.Entries) > 0 {
-	//	rf.matchIndex[server] = len(rf.log) - 1
-	//	rf.nextIndex[server] = rf.matchIndex[server] + 1
-	//	log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]成功,nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
-	//}
 
 	if len(args.Entries) > 0 {
 		if targetNextIndex > rf.nextIndex[server] {
 			rf.nextIndex[server] = targetNextIndex
 			rf.matchIndex[server] = targetNextIndex - 1
+			log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]成功,更新nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
 		}
 	}
-	//
-	//if len(args.Entries) > 0 {
-	//	rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
-	//	rf.matchIndex[server] = rf.nextIndex[server] - 1
-	//}
 }
