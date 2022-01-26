@@ -474,6 +474,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 	// Your code here (2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.state == LEADER {
 		//若为leader则开始
 		//构造日志
@@ -490,12 +491,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.persist()
 		//获取该日志的任期
 		term = rf.logEntries[index].Term
-		rf.mu.Unlock()
 		//重置心跳时间(立马发送心跳检测,更新日志)
-		rf.timerHeartBeat.Reset(0)
+		//rf.timerHeartBeat.Reset(0)
+		//立马进行一次广播
+		go rf.boardCast()
 		return index, term, isLeader
 	}
-	rf.mu.Unlock()
 	isLeader = false
 	return index, term, isLeader
 }
@@ -771,7 +772,9 @@ func (rf *Raft) toLeader() {
 	//当为leader时,开始启动协程来实时更新commitIndex
 	go rf.updateCommitIndex()
 	//立马开始一轮心跳
-	rf.timerHeartBeat.Reset(0)
+	//rf.timerHeartBeat.Reset(0)
+	//立马开始一轮广播
+	go rf.boardCast()
 }
 
 //转变为follower
