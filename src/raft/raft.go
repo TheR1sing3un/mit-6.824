@@ -351,18 +351,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	//开始日志同步
 	//如果一个已经存在的条目和新条目(即刚刚接收到的日志条目)发生了冲突(因为索引相同，任期不同),那么就删除这个已经存在的条目以及它之后的所有条目
-	for i := 0; i < len(args.Entries); i++ {
-		if len(rf.logEntries)-1 > args.PrevLogIndex+i && rf.logEntries[args.PrevLogIndex+1+i].Term != args.Entries[i].Term {
-			rf.logEntries = rf.logEntries[:args.PrevLogIndex+1+i]
-			log.Printf("id[%d].state[%v].term[%d]: index[%d]处日志的Term新日志entries[%d]的Term[%d]不匹配,删除index[%d]及其以后的log\n",
-				rf.me, rf.state, rf.currentTerm, args.PrevLogIndex+1+i, i, args.Entries[i].Term, args.PrevLogIndex+1+i)
-		}
-	}
-	//追加日志中尚未存在的任何新条目
-	for i, entry := range args.Entries {
-		if args.PrevLogIndex+1+i > len(rf.logEntries)-1 {
-			rf.logEntries = append(rf.logEntries, entry)
-			log.Printf("id[%d].state[%v].term[%d]: 保存日志[%v]到本队log中\n", rf.me, rf.state, rf.currentTerm, entry)
+	//for i := 0; i < len(args.Entries); i++ {
+	//	if len(rf.logEntries)-1 > args.PrevLogIndex+i && rf.logEntries[args.PrevLogIndex+1+i].Term != args.Entries[i].Term {
+	//		rf.logEntries = rf.logEntries[:args.PrevLogIndex+1+i]
+	//		log.Printf("id[%d].state[%v].term[%d]: index[%d]处日志的Term新日志entries[%d]的Term[%d]不匹配,删除index[%d]及其以后的log\n",
+	//			rf.me, rf.state, rf.currentTerm, args.PrevLogIndex+1+i, i, args.Entries[i].Term, args.PrevLogIndex+1+i)
+	//	}
+	//}
+	////追加日志中尚未存在的任何新条目
+	//for i, entry := range args.Entries {
+	//	if args.PrevLogIndex+1+i > len(rf.logEntries)-1 {
+	//		rf.logEntries = append(rf.logEntries, entry)
+	//		log.Printf("id[%d].state[%v].term[%d]: 保存日志[%v]到本队log中\n", rf.me, rf.state, rf.currentTerm, entry)
+	//	}
+	//}
+	for i, logEntry := range args.Entries {
+		index := args.PrevLogIndex + i + 1
+		if index > len(rf.logEntries)-1 {
+			rf.logEntries = append(rf.logEntries, logEntry)
+		} else { // 重叠部分
+			if rf.logEntries[index].Term != logEntry.Term {
+				rf.logEntries = rf.logEntries[:index]           // 删除当前以及后续所有log
+				rf.logEntries = append(rf.logEntries, logEntry) // 把新log加入进来
+			} // term一样啥也不用做，继续向后比对Log
 		}
 	}
 	//rf.logEntries = append(rf.logEntries[:args.PrevLogIndex+1], args.Entries...)
@@ -504,7 +515,7 @@ func (rf *Raft) updateCommitIndex() {
 		//		continue
 		//	}
 		//	//若matchIndex[i] >= n 而且log[n].term == currentTerm则该点成立
-		//	if len(rf.logEntries)-1 >= n && rf.matchIndex[i] >= n {
+		//	if len(rf.logEntries)-1 >= n && rf.matchIndex[i] >= n && rf.logEntries[n].Term == rf.currentTerm {
 		//		num++
 		//	}
 		//}
@@ -535,7 +546,7 @@ func (rf *Raft) updateCommitIndex() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
+		time.Sleep(1 * time.Millisecond)
 		rf.mu.Lock()
 	}
 }
@@ -731,6 +742,18 @@ func (rf *Raft) applyCommand() {
 	}
 }
 
+func (rf *Raft) applyCommands() {
+	for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+		applyMsg := ApplyMsg{
+			Command:      rf.logEntries[i].Command,
+			CommandIndex: i,
+			CommandValid: true,
+		}
+		rf.applyCh <- applyMsg
+	}
+	rf.lastApplied = rf.commitIndex
+}
+
 //转变为leader
 func (rf *Raft) toLeader() {
 	rf.mu.Lock()
@@ -771,18 +794,24 @@ func (rf *Raft) toCandidate() {
 //发起广播发送AppendEntries RPC
 func (rf *Raft) boardCast() {
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.state == LEADER {
 		log.Printf("id[%d].state[%v].term[%d]: 开始发送一轮AE发送\n", rf.me, rf.state, rf.currentTerm)
-		rf.mu.Unlock()
 		for i := range rf.peers {
-			rf.mu.Lock()
 			if i != rf.me {
+				//args := AppendEntriesArgs{
+				//	Term:         rf.currentTerm,
+				//	LeaderId:     rf.me,
+				//	PrevLogIndex: rf.nextIndex[i] - 1,
+				//	PrevLogTerm:  rf.logEntries[rf.nextIndex[i]-1].Term,
+				//	Entries:      rf.logEntries[rf.nextIndex[i]:],
+				//	LeaderCommit: rf.commitIndex,
+				//}
+				//reply := AppendEntriesReply{}
+				//log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, i, rf.nextIndex[i], rf.matchIndex[i])
 				go rf.handleAppendEntries(i)
 			}
-			rf.mu.Unlock()
 		}
-	} else {
-		rf.mu.Unlock()
 	}
 }
 
@@ -802,12 +831,29 @@ func (rf *Raft) handleAppendEntries(server int) {
 	}
 	log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
 	reply := AppendEntriesReply{}
-	targetNextIndex := rf.nextIndex[server] + len(args.Entries)
+	//targetNextIndex := rf.nextIndex[server] + len(args.Entries)
 	rf.mu.Unlock()
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
+	//defer func() {
+	//	commitCount := 1
+	//	for i := 0; i < len(rf.peers); i++ {
+	//		if i == rf.me {
+	//			continue
+	//		}
+	//		// 和其他服务器比较matchIndex 当到大多数的时候就可以提交这个值
+	//		if rf.matchIndex[i] >= rf.matchIndex[server] {
+	//			commitCount++
+	//		}
+	//	}
+	//	if commitCount >= len(rf.peers)/2+1 && rf.commitIndex < rf.matchIndex[server] && rf.logEntries[rf.matchIndex[server]].Term == rf.currentTerm {
+	//		rf.commitIndex = rf.matchIndex[server]
+	//		//大多数节点已经提交（复制）log，可以将log应用到commitIndex位置
+	//		rf.applyCommands()
+	//	}
+	//}()
 	log.Printf("id[%d].state[%v].term[%d]: 此时已有的log=[%v]\n", rf.me, rf.state, rf.currentTerm, rf.logEntries)
 	if !ok {
 		log.Printf("id[%d].state[%v].term[%d]: 发送ae to [%d] error\n", rf.me, rf.state, rf.currentTerm, server)
@@ -844,10 +890,13 @@ func (rf *Raft) handleAppendEntries(server int) {
 	}
 
 	if len(args.Entries) > 0 {
-		if targetNextIndex > rf.nextIndex[server] {
-			rf.nextIndex[server] = targetNextIndex
-			rf.matchIndex[server] = targetNextIndex - 1
-			log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]成功,更新nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
-		}
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+		log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]成功,更新nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
+		//if targetNextIndex > rf.nextIndex[server] {
+		//	rf.nextIndex[server] = targetNextIndex
+		//	rf.matchIndex[server] = targetNextIndex - 1
+		//	log.Printf("id[%d].state[%v].term[%d]: 追加日志到server[%d]成功,更新nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
+		//}
 	}
 }
