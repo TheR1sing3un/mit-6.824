@@ -799,38 +799,38 @@ func (rf *Raft) boardCast() {
 		log.Printf("id[%d].state[%v].term[%d]: 开始发送一轮AE发送\n", rf.me, rf.state, rf.currentTerm)
 		for i := range rf.peers {
 			if i != rf.me {
-				//args := AppendEntriesArgs{
-				//	Term:         rf.currentTerm,
-				//	LeaderId:     rf.me,
-				//	PrevLogIndex: rf.nextIndex[i] - 1,
-				//	PrevLogTerm:  rf.logEntries[rf.nextIndex[i]-1].Term,
-				//	Entries:      rf.logEntries[rf.nextIndex[i]:],
-				//	LeaderCommit: rf.commitIndex,
-				//}
-				//reply := AppendEntriesReply{}
-				//log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, i, rf.nextIndex[i], rf.matchIndex[i])
-				go rf.handleAppendEntries(i)
+				args := AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.nextIndex[i] - 1,
+					PrevLogTerm:  rf.logEntries[rf.nextIndex[i]-1].Term,
+					Entries:      rf.logEntries[rf.nextIndex[i]:],
+					LeaderCommit: rf.commitIndex,
+				}
+				reply := AppendEntriesReply{}
+				log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, i, rf.nextIndex[i], rf.matchIndex[i])
+				go rf.handleAppendEntries(i, args, reply)
 			}
 		}
 	}
 }
 
-func (rf *Raft) handleAppendEntries(server int) {
+func (rf *Raft) handleAppendEntries(server int, args AppendEntriesArgs, reply AppendEntriesReply) {
 	rf.mu.Lock()
 	if rf.state != LEADER {
 		rf.mu.Unlock()
 		return
 	}
-	args := AppendEntriesArgs{
-		Term:         rf.currentTerm,
-		LeaderId:     rf.me,
-		PrevLogIndex: rf.nextIndex[server] - 1,
-		PrevLogTerm:  rf.logEntries[rf.nextIndex[server]-1].Term,
-		Entries:      rf.logEntries[rf.nextIndex[server]:],
-		LeaderCommit: rf.commitIndex,
-	}
-	log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
-	reply := AppendEntriesReply{}
+	//args := AppendEntriesArgs{
+	//	Term:         rf.currentTerm,
+	//	LeaderId:     rf.me,
+	//	PrevLogIndex: rf.nextIndex[server] - 1,
+	//	PrevLogTerm:  rf.logEntries[rf.nextIndex[server]-1].Term,
+	//	Entries:      rf.logEntries[rf.nextIndex[server]:],
+	//	LeaderCommit: rf.commitIndex,
+	//}
+	//log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
+	//reply := AppendEntriesReply{}
 	//targetNextIndex := rf.nextIndex[server] + len(args.Entries)
 	rf.mu.Unlock()
 	ok := rf.sendAppendEntries(server, &args, &reply)
