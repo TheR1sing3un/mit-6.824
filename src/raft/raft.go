@@ -97,6 +97,7 @@ type Raft struct {
 	timeoutHeartBeat int           //心跳频率/ms
 	timeoutElect     int           //选举频率/ms
 	applyCh          chan ApplyMsg //命令应用通道
+	applyCond        *sync.Cond    //命令应用cond
 	//最近快照的数据
 	lastIncludedIndex int    //最近快照的lastIncludedIndex
 	lastIncludedTerm  int    //最近快照的lastIncludedTerm
@@ -507,7 +508,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//preLogIndex处无日志,记录XTerm为-1
 		reply.XTerm = -1
 		//记录XLen为日志的长度(不包含初始占位日志)
-		reply.XLen = len(rf.logEntries) - 1
+		reply.XLen = rf.lastLog().Index
 		log.Printf("id[%d].state[%v].term[%d]: 追加日志的和现在的日志不匹配\n", rf.me, rf.state, rf.currentTerm)
 		return
 	}
@@ -557,6 +558,7 @@ func (rf *Raft) updateCommitIndexForFollower(leaderCommit int) {
 			log.Printf("id[%d].state[%v].term[%d]: 重置commitIndex为leaderCommit[%d]\n", rf.me, rf.state, rf.currentTerm, rf.commitIndex)
 		}
 	}
+	rf.applyCond.Signal()
 }
 
 //二分查找目标term的第一个log的index(寻找左边界)
@@ -703,6 +705,8 @@ func (rf *Raft) UpdateCommitIndex() {
 			if num >= updateConNum {
 				rf.commitIndex = i
 				log.Printf("id[%d].state[%v].term[%d]: n = %d, 过半节点的matchIndex >= n而且log[n].Term == currentTerm,则更新commitIndex = %d\n", rf.me, rf.state, rf.currentTerm, i, i)
+				//唤醒ApplyCommand routine
+				rf.applyCond.Signal()
 				break
 			}
 		}
@@ -872,6 +876,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.lastIncludedIndex = 0
 	rf.lastIncludedTerm = -1
+	rf.applyCond = sync.NewCond(&rf.mu)
 	log.Printf("id[%d].state[%v].term[%d]: finish init\n", rf.me, rf.state, rf.currentTerm)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -885,25 +890,56 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // ApplyCommand 检查是否 commitIndex > lastApplied,若是则lastApplied递增,并将log[lastApplied]应用到状态机
 func (rf *Raft) ApplyCommand() {
 	for !rf.killed() {
-		time.Sleep(10 * time.Millisecond)
+		//time.Sleep(10 * time.Millisecond)
 		rf.mu.Lock()
 		//log.Printf("id[%d].state[%v].term[%d]:commitIndex[%d];lastIncludedIndex[%d]\n", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastIncludedIndex)
-		if rf.logEntries[rf.commitIndex-rf.lastIncludedIndex].Term != rf.currentTerm {
-			rf.mu.Unlock()
-			continue
+		//if rf.logEntries[rf.commitIndex-rf.lastIncludedIndex].Term != rf.currentTerm {
+		//	rf.mu.Unlock()
+		//	continue
+		//}
+		//不符合条件时放弃锁进行等待
+		for rf.lastApplied >= rf.commitIndex {
+			rf.applyCond.Wait()
 		}
-		for rf.commitIndex > rf.lastApplied {
-			rf.lastApplied++
-			applyMsg := ApplyMsg{
-				Command:      rf.logEntries[rf.lastApplied-rf.lastIncludedIndex].Command,
-				CommandIndex: rf.lastApplied,
+		//for rf.commitIndex > rf.lastApplied {
+		//	rf.lastApplied++
+		//	applyMsg := ApplyMsg{
+		//		Command:      rf.logEntries[rf.lastApplied-rf.lastIncludedIndex].Command,
+		//		CommandIndex: rf.lastApplied,
+		//		CommandValid: true,
+		//	}
+		//	log.Printf("id[%d].state[%v].term[%d]: 检测到commitIndex[%d] > lastApplied[%d],更新lastApplied = %d,并应用到状态机中\n", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied-1, rf.lastApplied)
+		//	//go func(applyMsg ApplyMsg) {
+		//	//	rf.applyCh <- applyMsg
+		//	//}(applyMsg)
+		//	rf.applyCh <- applyMsg
+		//}
+		//被唤醒而且符合条件
+		//当前的commitIndex
+		commitIndex := rf.commitIndex
+		applyEntries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
+		copy(applyEntries, rf.logEntries[rf.lastApplied+1-rf.lastIncludedIndex:rf.commitIndex+1-rf.lastIncludedIndex])
+		rf.mu.Unlock()
+		//解锁后进行apply
+		for _, entry := range applyEntries {
+			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: entry.Index,
 			}
-			log.Printf("id[%d].state[%v].term[%d]: 检测到commitIndex[%d] > lastApplied[%d],更新lastApplied = %d,并应用到状态机中\n", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied-1, rf.lastApplied)
-			rf.applyCh <- applyMsg
 		}
+		rf.mu.Lock()
+		//更新lastApplied,由于在apply过程中进行了解锁,因此不能使用现在的commitIndex,而是之前情况的commitIndex
+		rf.lastApplied = Max(rf.lastApplied, commitIndex)
 		rf.mu.Unlock()
 	}
+}
+
+func Max(a int, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // ToLeader 转变为leader
