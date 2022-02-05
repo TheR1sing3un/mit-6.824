@@ -951,7 +951,7 @@ func (rf *Raft) BoardCast() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.state == LEADER {
-		log.Printf("id[%d].state[%v].term[%d]: 开始发送一轮AE发送\n", rf.me, rf.state, rf.currentTerm)
+		log.Printf("id[%d].state[%v].term[%d]: 开始一轮广播\n", rf.me, rf.state, rf.currentTerm)
 		for i := range rf.peers {
 			if i != rf.me {
 				////判断需要传的日志是否存在于快照中
@@ -987,6 +987,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 			Data:              rf.snapshotData,
 		}
 		reply := InstallSnapshotReply{}
+		log.Printf("id[%d].state[%v].term[%d]: 发送installSnapshot to [%d];lastIncludedIndex=[%d],lastIncludedTerm=[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.logEntries[0].Index, rf.logEntries[0].Term)
 		rf.mu.Unlock()
 		ok := rf.sendInstallSnapshot(server, &args, &reply)
 		rf.mu.Lock()
@@ -1022,6 +1023,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		LeaderCommit: rf.commitIndex,
 	}
 	reply := AppendEntriesReply{}
+	log.Printf("id[%d].state[%v].term[%d]: 发送appendEntries to [%d];PrevLogIndex=[%d];Entires=[%v]\n", rf.me, rf.state, rf.currentTerm, server, args.PrevLogIndex, args.Entries)
 	rf.mu.Unlock()
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	rf.mu.Lock()
