@@ -195,6 +195,10 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
+func (rf *Raft) readSnapshot() {
+
+}
+
 //保存raft状态和snapshot
 func (rf *Raft) persistStateAndSnapshot() {
 	w := new(bytes.Buffer)
@@ -257,9 +261,12 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	//4.更改日志占位节点
 	rf.logEntries[0].Index = lastIncludedIndex
 	rf.logEntries[0].Term = lastIncludedTerm
-	//5.持久化
+	//5.更新commitIndex和lastAppliedIndex
+	rf.commitIndex = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
+	//6.持久化
 	rf.persistStateAndSnapshot()
-	log.Printf("id[%d].state[%v].term[%d]: 安装snapshot:lastIncludedIndex=[%d],lastIncludedTerm=[%d] 成功\n", rf.me, rf.state, rf.currentTerm, lastIncludedIndex, lastIncludedTerm)
+	log.Printf("id[%d].state[%v].term[%d]: 安装snapshot:lastIncludedIndex=[%d],lastIncludedTerm=[%d] 成功;commitIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, lastIncludedIndex, lastIncludedTerm, rf.commitIndex)
 	return true
 }
 
@@ -852,7 +859,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	log.Printf("id[%d].state[%v].term[%d]: finish init\n", rf.me, rf.state, rf.currentTerm)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	rf.lastApplied = rf.logEntries[0].Index
+	rf.commitIndex = rf.logEntries[0].Index
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.ApplyCommand()
@@ -967,6 +975,8 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		rf.mu.Unlock()
 		return
 	}
+	log.Printf("id[%d].state[%v].term[%d]: leader此时的log=[%v]\n", rf.me, rf.state, rf.currentTerm, rf.logEntries)
+	log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d],lastIncludedIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server], rf.logEntries[0].Index)
 	//检查此时是否传的日志存在于快照中
 	if rf.nextIndex[server] <= rf.logEntries[0].Index {
 		args := InstallSnapshotArgs{
@@ -994,11 +1004,15 @@ func (rf *Raft) HandleAppendEntries(server int) {
 			rf.toFollower()
 			rf.voteFor = -1
 			log.Printf("id[%d].state[%v].term[%d]: 发送installSnapshot to [%d] 过期,转变为follower\n", rf.me, rf.state, rf.currentTerm, server)
+			return
 		}
+		//若安装成功,则更新nextIndex和matchIndex
+		rf.matchIndex[server] = args.LastIncludedIndex
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+		log.Printf("id[%d].state[%v].term[%d]: 发送installSnapshot to [%d] 成功,更新nextIndex->[%d];matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
 		return
 	}
 	//若不存在于快照中,则正常appendEntries
-	log.Printf("id[%d].state[%v].term[%d]: server[%d]的nextIndex=[%d],matchIndex=[%d],lastIncludedIndex=[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server], rf.logEntries[0].Index)
 	args := AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		LeaderId:     rf.me,
@@ -1013,7 +1027,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	log.Printf("id[%d].state[%v].term[%d]: 此时已有的log=[%v]\n", rf.me, rf.state, rf.currentTerm, rf.logEntries)
+	//log.Printf("id[%d].state[%v].term[%d]: 此时已有的log=[%v]\n", rf.me, rf.state, rf.currentTerm, rf.logEntries)
 	//过期的请求直接结束
 	if rf.state != LEADER || args.Term != rf.currentTerm {
 		return
