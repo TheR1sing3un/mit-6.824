@@ -954,14 +954,6 @@ func (rf *Raft) BoardCast() {
 		log.Printf("id[%d].state[%v].term[%d]: 开始一轮广播\n", rf.me, rf.state, rf.currentTerm)
 		for i := range rf.peers {
 			if i != rf.me {
-				////判断需要传的日志是否存在于快照中
-				//if rf.nextIndex[i] <= rf.logEntries[0].Index {
-				//	//若需要发送的index是快照,那么直接进行快照发送
-				//	go rf.HandleInstallSnapshot(i)
-				//} else {
-				//	//否则正常进行log复制发送
-				//	go rf.HandleAppendEntries(i)
-				//}
 				go rf.HandleAppendEntries(i)
 			}
 		}
@@ -1019,12 +1011,15 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		LeaderId:     rf.me,
 		PrevLogIndex: rf.nextIndex[server] - 1,
 		PrevLogTerm:  rf.index(rf.nextIndex[server] - 1).Term,
-		Entries:      rf.logEntries[rf.binaryFindRealIndexInArrayByIndex(rf.nextIndex[server]):],
+		//Entries:      rf.logEntries[rf.binaryFindRealIndexInArrayByIndex(rf.nextIndex[server]):],
 		LeaderCommit: rf.commitIndex,
 	}
+	args.Entries = make([]LogEntry, len(rf.logEntries)-rf.binaryFindRealIndexInArrayByIndex(rf.nextIndex[server]))
+	copy(args.Entries, rf.logEntries[rf.binaryFindRealIndexInArrayByIndex(rf.nextIndex[server]):])
 	reply := AppendEntriesReply{}
-	log.Printf("id[%d].state[%v].term[%d]: 发送appendEntries to [%d];PrevLogIndex=[%d];Entires=[%v]\n", rf.me, rf.state, rf.currentTerm, server, args.PrevLogIndex, args.Entries)
+	log.Printf("id[%d].state[%v].term[%d]: 发送appendEntries to [%d];PrevLogIndex=[%d];Entries=[%v]\n", rf.me, rf.state, rf.currentTerm, server, args.PrevLogIndex, args.Entries)
 	rf.mu.Unlock()
+	log.Printf("发送appendEntries to [%d];Entries=[%v]\n", server, args.Entries)
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
