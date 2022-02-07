@@ -2,7 +2,7 @@
 
 ## Lab1
 
-> Rules
+### Rules
 
 1. 最后文件需要输出nReduce个，文件名格式为`mr-out-X`
 2. 输出到文件的格式在`mrsequential.go`中
@@ -11,7 +11,7 @@
 5. 需要实现`coordinator.go`中的`Done()`方法，当全部任务被执行完了之后返回true，然后`mrcoordinator`退出
 6. 当所有的任务的完成的时候，worker也应该停止。简单的方法就是使用rpc的回调，当返回err，也就是故障的时候，这里可以理解为coordinator已经结束了，所以这时候worker可以退出了。
 
-> Hints
+### Hints
 
 1. 一开始可以先实现worker的worker方法来和coordinator进行rpc调用来获取任务，coordinator回应给他文件名作为一个还未开始的map任务。然后worker读取这些文件然后调用map方法，参考`mrsequential.go`中的方法
 2. map和reduce方法是作为插件使用的，记得启动的时候带上参数`wc.so`
@@ -25,7 +25,7 @@
 10. coordinator不能可靠的区别那些故障worker，包括那些执行的太慢的节点。最好就是每次分配了任务之后可以等待10秒，如果10秒都没有完成，就可以认为该worker已故障了。需要重新将该任务分配给别的worker。
 11. 测试故障恢复可以使用`mrapps/crash.go`插件，会随机在map和reduce中故障
 12. 为了不让已经故障的节点的产生文件对作为真正的中间文件，可以使用论文中提到的临时文件的方法，worker写的使用可以使用临时文件，使用`ioutil.TempFile`来创建临时文件，然后完成之后使用`os.rename`来原子性的命名。
-13. 
+13.
 
 ---
 
@@ -33,7 +33,7 @@
 
 > 结构
 
-​		*任务的id(若为map类型则id为0-files.size-1，若为reduce类型则为分区序号，也就是0-nReduce-1)*
+​		*任务的id(若为map类型则id为0~files.size-1，若为reduce类型则为分区序号，也就是0~nReduce-1)*
 
 - `Id int`
 
@@ -117,8 +117,11 @@ func (t *Task)isReduceTask() bool
 1. rpc调用coordinator的GetTask方法，若获取到Task则执行相应的方法，map或者reduce。若返回的Task为空的时候sleep一秒后再循环获取。若rpc调用返回err则worker可以退出了；
 2. 当完成一个任务的时候，将完成的任务的情况rpc调用FinishedTask方法来通知coordinator。调用err的时候直接退出。
 3. 有map和reduce方法，分别进行处理。
+
 ---
+
 ---
+
 ## Lab2
 
 ### Summary
@@ -216,7 +219,7 @@ Raft 通过选举一个杰出的领导人，然后给予他全部的管理复制
 跟随者（5.2 节）：
 
 - 响应来自候选人和领导人的请求
-- 如果在超过选举超时时间的情况之前没有收到**当前领导人**（即该领导人的任期需与这个跟随者的当前任期相同）的心跳/附加日志，或者是给某个候选人投了票，就自己变成候选人
+- 如果在超过选举超时时间的情况之前没有收到**当前领导人**（即该领导人的任期需与这个跟随者的当前任期相同）的心跳/附加日志，或者是没有给某个候选人投了票，就自己变成候选人
 
 候选人（5.2 节）：
 
@@ -264,13 +267,9 @@ Raft 通过选举一个杰出的领导人，然后给予他全部的管理复制
 
 > 图 3：Raft 在任何时候都保证以上的各个特性。
 
-### 5.1 Raft 基础
-
 一个 Raft 集群包含若干个服务器节点；5 个服务器节点是一个典型的例子，这允许整个系统容忍 2 个节点失效。在任何时刻，每一个服务器节点都处于这三个状态之一：领导人、跟随者或者候选人。在通常情况下，系统中只有一个领导人并且其他的节点全部都是跟随者。跟随者都是被动的：他们不会发送任何请求，只是简单的响应来自领导人或者候选人的请求。领导人处理所有的客户端请求（如果一个客户端和跟随者联系，那么跟随者会把请求重定向给领导人）。第三种状态，候选人，是用来在 5.2 节描述的选举新领导人时使用。图 4 展示了这些状态和他们之间的转换关系；这些转换关系会在接下来进行讨论。
 
 ![image-20220115222119698](https://ther1sing3un-personal-resource.oss-cn-beijing.aliyuncs.com/typora/images/image-20220115222119698.png)
-
-
 
 ---
 
@@ -290,7 +289,6 @@ Raft 通过选举一个杰出的领导人，然后给予他全部的管理复制
 10. 您需要编写定期执行操作或在时间延迟之后执行操作的代码。最简单的方法是创建一个 goroutine，循环调用`time.Sleep()`。
 11. 记得完成`Getstate()`
 12. 测试会调用你的`rf.Kill()`当它永久的关闭一个实例时，你可以使用`rf.Kill()`来检查`Killed()`是否已经被调用。最好每个循环都来判断一下。
-1.
 
 ---
 
@@ -325,4 +323,100 @@ Raft 通过选举一个杰出的领导人，然后给予他全部的管理复制
 3. 2C只要求你实现持久化(persistense)和日志快速恢复(fast log backtracking)，2C的test可能会因为之前的部分导致失败。即使你通过了2A和2B的代码，但是你可能还是会有选举和日志的bug在2C的test中被暴露。
 
 ---
+
+### Lab2d
+
+为了支持快照，我们需要在service层和Raft库之间的接口。Raft论文没有指定这个接口，因此很多设计都是可以的。为了一个简单的实现，我们决定使用接下来的接口：
+
+- `Snapshot(index int, snapshot []byte)`
+- `CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool`
+
+service层调用`Snapshot()`将其状态传递给Raft。快照包含所有的信息以及index。这意味着相应的Raft节点不再需要日志。你的Raft实现应该尽可能的调整log。你必须修改你的Raft代码来只操作末尾的log。
+
+正如Raft论文中讨论的那样，Raft的leaders必须通过安装快照的方式来告诉落后的Raft节点来更新它的的状态。你需要实现`InstallSnapshot`的RPC发送和处理为了安装快照。这和`AppendEntries`形成对比，`AppendEntries`发送日志条目然后一个个被service应用。
+
+`InstallSnapshot`的RPC是在Raft节点间调用，而提供的框架函数`Snapshot/CondInstallSnapshot`是service用来和Raft通信的。
+
+当follower接受并处理`InstallSnapshot`的RPC请求时，它必须使用Raft将包含的快照交给service。`InstallSnapshot`处理程序可以使用`applyCh`来发送快照，通过将快照放入到`ApplyMsg`中。service从`applyCh`中读取，然后和快照调用`CondInstallSnapshot`来告诉Raft：service正在切换成传入快照状态，然后Raft应该同时更新自己的日志。(参见`config.go`中的`applierSnap()`来查看tester服务是怎么做这个的)。
+
+`CondInstallSnapshot`应该拒绝安装旧的快照(如果Raft在`lastIncludedTerm/lastIncludedIndex`之后处理了日志条目)。这个因为Raft可能在处理`InstallSnapshot`RPC之后和在service调用`CondInstallSnapshot`之前处理了其他的RPC并在`applyCh`上发消息了。不允许Raft回到旧的快照，因此必须拒绝旧的快照。当你的实现拒绝快照时，`CondInstallSnapshot`应该直接返回`false`使得service知道现在不应该切换这个快照。
+
+如果快照是最近的，Raft应该调整日志，持久化新的状态，返回true，以及service应该切换到这个快照在处理下一个消息到`applyCh`之前。
+
+`CondInstallSnapshot`是一种更新Raft和service的状态的方式；其他接口也是可以的。这个特殊的设计允许你的实现检查一个快照是否必须安装在一个地方，并且原子性地将service和Raft切换到快照。你可以自由地以`CondInstallSnapshot`始终可以返回`true`的方式来实现你的Raft。
+
+#### Task
+
+修改你的Raft代码来支持快照；实现`SnapShot`，`CondInstallSnapshot`以及`InstallSnapshot`的RPC。以及对Raft的更改来支持这些(例如：继续使用修剪后的日志)你的解决方案通过2D测试和所有的Lab2测试的时候，它就完成了。
+
+#### Hints
+
+1. 在一个`InstallSnapshot`中发送整个快照。不要实现图13的分割快照的`offset`机制。
+2. Raft必须丢弃旧的日志以允许Go的垃圾回收器来使用和重用内存；这要求对于丢弃的日志没有可达的引用(指针)。
+3. Raft的日志不再使用日志条目的位置或日志长度的方式来确定日志的条目索引；您需要使用独立于日志位置的索引方案。
+4. 即使日志被修剪，你的实现仍需要在`AppendEntries`正确的发送日志的Term和Index；这可能需要保存和引用最新的快照的`lastIncludedTerm/lastIncludedIndex`(考虑是否应该持久化)
+5. Raft必须存储每一个快照到persiser中，通过`SaveStateAndSnapshot()`。
+6. 对于整套的Lab2测试，合理的时间消耗应该是8分钟的实际时间和1.5分钟的CPU时间。
+
+---
+
+## Lab3
+
+### Introduction
+
+在这个lab中，你将构建一个基于lab的Raft库实现的容错性kv存储服务。你的kv服务将是一个复制的状态机，由几个使用Raft进行复制的kv服务器组成。你的kv服务应该在当大多数服务器处于活动状态并且可以通信的时候继续处理客户机请求，即使出现其他故障或者网络分区。lab3之后，你将实现raft_diagram中的所有模块(Clerk，Service and Raft)。
+
+这个服务支持三个操作：`Put(key, value)`，`Append(key, arg)`以及`Get(key)`。它维护一个简单的kv键值对数据库。键值对都是字符串。`Put()`替换数据库中特定键的值，`Append(key, arg)`将arg附加到key的值上，以及`Get()`获取当前键的值。`Get()`一个不存在的key将返回一个空字符串。`Append()`一个不存在的key就和`Put()`效果相同。每一个客户端和服务用一个`Clerk`的Put/Append/Get方法来交互。一个`Clerk`管理和服务器的RPC交互。
+
+你的服务必须为`Clerk`的Get/Put/Append方法提供强一致性。以下是我们认为的强一致性。如果一次调用一个，那么Get/Put/Append方法应该像系统只有一个副本那样工作，每次调用都应该观察前面的调用序列所暗示的对状态的修改。对于并发调用，返回值和最终状态必须相同，就像操作以某种顺序一次执行一个操作一样。如果调用在时间上有重叠，例如，客户端X调用了`Clerk.Put()`，然后客户端Y调用`Clerk.Append()`，然后X的调用返回结果了。此外，一次调用必须观察在调用开始之前完成的所有调用的效果(所以我们在技术上要求线性化)。
+
+强一致性对于应用程序来说很方便，因此这非正式地意味着，所有客户端看到的状态都是一样的并且看到了都是最新的状态。对于单机来说，提供强一致性相对容易。但是如果服务是有副本的，那就困难了。因为所有的服务器必须为并发请求选择相同的执行顺序，并且必须避免使用不是最新的状态来回复客户端。
+
+这个lab有两个部分。在A部分，你将实现一个不用担心Raft的log会无限增长的服务。在B部分，你将实现一个快照(论文第7节)，也就是让Raft丢弃旧的log。
+
+你应该重新阅读Raft论文，特别是第7和第8节。广阔来看，你可以看一下Chubby、Paxos Made Live、Spanner、Zookeeper、Harp、Viewstamped Replication以及Bolosky et al。
+
+### Getting Started
+
+我们在`src/kvraft`中提供框架代码和测试。你需要修改`kvraft/client.go`，`kvraft/server.go`以及可能也要`kvraft/common.go`
+
+### Lab3a
+
+> 一个没有快照的kv服务
+
+每一个你的kv服务器都需要有一个与之关联的Raft节点。Clerks发送`Put()`，`Append()`和`Get()`的RPC请求到当前Raft中leader的那个kvserver上。kvserver将Put/Append/Get操作提交给Raft，以便Raft保存一系列Put/Append/Get操作。所有的kvserver从Raft的log中按顺序执行操作，并将这些操作应用到他们的kv数据库上。这样做的目的是在所有的服务器上维护相同的kv数据库副本。
+
+一个`Clerk`有时候不知道哪一个kvserver是Raft的leader。如果一个`Clerk`发送一个RPC请求到错误的kvserver上，或者没有到达kvserver上；`Clerk`应该通过发送到不同的kvserver上来进行重试。如果一个kv服务将操作提交到它的Raft日志中(并将操作用用到kv状态机上)，那么leader将通过RPC来回应`Clerk`。如果操作没有成功提交(比如leader被更替了)，这个服务器将报告error，然后`Clerk`将在不同的服务器上重试。
+
+你的kvservers不应该直接进行通信；它们应该只通过他们的Raft来进行通信。
+
+#### Task1
+
+你的首要任务是实现一个当没有消息丢失和服务器失败的解决方案。
+
+你将需要增加`client.go`中关于Clerk的Put/Append/Get方法的RPC发送代码，以及实现`server.go`中的`PutAppend()`和`Get()`的RPC处理程序。这些处理程序应该使用`Start()`来在Raft日志中输入一个`Op`；你应该完善`server.go`里面的`Op`的结构定义以至于它可以描述一个Put/Append/Get操作。每一个服务器应该在Raft提交`Op`命令时执行这些命令，即当它们出现在`applyCh`时。RPC处理程序应该在Raft提交其`Op`时发出通知，然后回复RPC。
+
+当你可靠的通过测试中的第一个测试："One Client"时，你就完成了这个任务。
+
+#### Hints1
+
+- 调用`Start()`之后，你的kvservers将需要等待Raft去完成agreement。已经达成一致的命令道道`applyCh`。你的代码需要保持读取`applyCh`当`PutAppend()`和`Get()`处理程序使用`Start()`提交了命令到Raft日志中的时候。注意kvserver和Raft库之间的死锁问题。
+- 你可以向`ApplyMsg`和RPC处理程序比如说`AppendEntries`中添加字段。但是对于大多数实现都是不需要的。
+- 一个kvserver不应该完成一个`Get()`的RPC请求当它不是大多数的那一部分。一个简单的解决方案就是在Raft日志中输入每一个`Get()`(以及每一个`Put()`和`Append()`)。你不必实现论文章第八节描述的只读操作的优化。
+- 最好一开始就加锁因为避免死锁有时候会影响整个的代码设计。使用`go test -race`来检查的你的代码是不是race-free。
+
+现在你需要修改你的解决方案，以便在网络和服务器出现故障时继续执行。您将面临的一个问题是，`Clerk`可能不得不的发送多次RPC知道它找到了一个积极响应的kvserver时。如果一个leader在向Raft日志中提交了一个条目之后失败了，`Clerk`可能不会收到回应，因此可能需要重发请求到别的leader那里。每次`Clerk.Put()`或者`Clerk.Append()`的调用应该最终只执行一次，因此你必须确保重发不会导致服务器执行两次请求。
+
+#### Task2
+
+添加代码来处理失败，并处理重复的`Clerk`请求，包括这样的情况：`Clerk`在一个任期内发送请求到kvserver的leader，等待回复超时，然后再另一个任期重新向新领导发送请求。请求应该只执行一次。您的代码应该能够通过
+
+`go test -run 3A -race`。
+
+#### Hints2
+
+- 你的解决方案需要处理一个领导者，该领导者已经为Clerk的RPC请求调用了`Start()`，但是在将请求提交到日志之前失去了领导权。在这种情况，你应该安排`Clerk`去重发请求到其他服务器直到发到了新的leader那里。这样做的一个方法是，服务器通过注意`Start()`返回的索引出现了不同的请求，或者Raft的任期已经改变，来检测它是否失去了领导权。如果当前领导者自己分区，那么它不会知道新的领导者；但是同一分区的任何客户端也不能和新领导者交互；所以在这种情况下，服务器和客户端可以无限期的等待，直到分区恢复。
+- 你可能必须修改您的Clerk，以便记住最后一个RPC的主机是哪个服务器，并首先将下一个RPC发送到该服务器。这将避免浪费时间在通过RPC来找领导者上，这可能会帮助你快速的通过一些测试。
+- 你将需要唯一地标识客户端的操作，以确保kv服务只执行每个操作一次。
+- 你的重复检测方案应该能够快速的释放服务器内存，例如，让暗示每一个RPC都看到了前一个RPC的回复。假设客户端只在Clerk调用一次是可以的。
 
