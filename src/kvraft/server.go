@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -34,6 +35,7 @@ type Op struct {
 	Key         string           //键
 	Value       string           //值(Get请求时此处为空)
 	ReplyCh     chan CommonReply //当命令未被Apply时,RPC在该Cond上等待,被Apply后则Signal
+	CommandId   int64            //命令的唯一id
 }
 
 type KVServer struct {
@@ -59,16 +61,17 @@ type CommonReply struct {
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	//defer kv.mu.Unlock()
 	defer func() {
-		//log.Printf("kvserver[%d]: 返回Get RPC请求,args=[%v];reply=[%v]\n", kv.me, args, reply)
+		log.Printf("kvserver[%d]: 返回Get RPC请求,args=[%v];reply=[%v]\n", kv.me, args, reply)
 	}()
-	//log.Printf("kvserver[%d]: 接收Get RPC请求,args=[%v]\n", kv.me, args)
+	log.Printf("kvserver[%d]: 接收Get RPC请求,args=[%v]\n", kv.me, args)
 	//1.先判断该命令是否已经被执行过了
 	if commonReply, ok := kv.opReply[args.CommandId]; ok {
 		//当存在该命令时(即已经被执行过了,那么直接返回响应)
 		reply.Err = commonReply.Err
 		reply.Value = commonReply.Value
+		kv.mu.Unlock()
 		return
 	}
 	//2.若命令未被执行,那么开始生成Op并传递给raft
@@ -76,37 +79,49 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		CommandType: GetMethod,
 		Key:         args.Key,
 		ReplyCh:     make(chan CommonReply),
+		CommandId:   args.CommandId,
 	}
 	_, _, isLeader := kv.rf.Start(op)
 	//3.若不为leader则直接返回Err
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
 	kv.mu.Unlock()
 	//4.等待应用后返回消息
-	replyMsg := <-op.ReplyCh
-	//5.当被通知时,返回结果
-	reply.Err = replyMsg.Err
-	reply.Value = replyMsg.Value
-	//6.更新CommandId -> Reply
-	kv.mu.Lock()
-	kv.opReply[args.CommandId] = CommonReply{reply.Err, reply.Value}
-	return
+	select {
+	case replyMsg := <-op.ReplyCh:
+		//当被通知时,返回结果
+		reply.Err = replyMsg.Err
+		reply.Value = replyMsg.Value
+		//kv.mu.Lock()
+		////更新CommandId -> Reply
+		//commonReply := CommonReply{reply.Err, reply.Value}
+		//kv.opReply[op.CommandId] = commonReply
+		//log.Printf("kvserver[%d]: 更新CommandId=[%d],Reply=[%v]\n", kv.me, op.CommandId, commonReply)
+		//kv.mu.Unlock()
+		return
+	case <-time.After(2000 * time.Millisecond):
+		reply.Err = ErrWrongLeader
+		return
+	}
+
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	//defer kv.mu.Unlock()
 	defer func() {
-		//log.Printf("kvserver[%d]: 返回PutAppend RPC请求,args=[%v];reply=[%v]\n", kv.me, args, reply)
+		log.Printf("kvserver[%d]: 返回PutAppend RPC请求,args=[%v];reply=[%v]\n", kv.me, args, reply)
 	}()
-	//log.Printf("kvserver[%d]: 接收PutAppend RPC请求,args=[%v]\n", kv.me, args)
+	log.Printf("kvserver[%d]: 接收PutAppend RPC请求,args=[%v]\n", kv.me, args)
 	//1.先判断该命令是否已经被执行过了
 	if commonReply, ok := kv.opReply[args.CommandId]; ok {
 		//当存在该命令时(即已经被执行过了,那么直接返回响应)
 		reply.Err = commonReply.Err
+		kv.mu.Unlock()
 		return
 	}
 	//2.若命令未被执行,那么开始生成Op并传递给raft
@@ -115,29 +130,41 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Key:         args.Key,
 		Value:       args.Value,
 		ReplyCh:     make(chan CommonReply),
+		CommandId:   args.CommandId,
 	}
 	_, _, isLeader := kv.rf.Start(op)
 	//3.若不为leader则直接返回Err
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
 	kv.mu.Unlock()
 	//4.等待应用后返回消息
-	replyMsg := <-op.ReplyCh
-	//5.当被通知时,返回结果
-	reply.Err = replyMsg.Err
-	//6.更新CommandId -> Reply
-	kv.mu.Lock()
-	kv.opReply[args.CommandId] = CommonReply{reply.Err, ""}
-	return
+	select {
+	case replyMsg := <-op.ReplyCh:
+		//当被通知时,返回结果
+		reply.Err = replyMsg.Err
+		//kv.mu.Lock()
+		////更新CommandId -> Reply
+		//commonReply := CommonReply{reply.Err, ""}
+		//kv.opReply[op.CommandId] = commonReply
+		//log.Printf("kvserver[%d]: 更新CommandId=[%d],Reply=[%v]\n", kv.me, op.CommandId, commonReply)
+		//kv.mu.Unlock()
+		return
+	case <-time.After(2000 * time.Millisecond):
+		//超时,返回结果,但是不更新Command -> Reply
+		reply.Err = ErrWrongLeader
+		return
+	}
 }
 
 func (kv *KVServer) ApplyCommand() {
 	for !kv.killed() {
 		applyMsg := <-kv.applyCh
-		//log.Printf("kvserver[%d]: 获取到applyCh中新的applyMsg=[%v]\n", kv.me, applyMsg)
+		log.Printf("kvserver[%d]: 获取到applyCh中新的applyMsg=[%v]\n", kv.me, applyMsg)
 		kv.mu.Lock()
+		var commonReply CommonReply
 		//当为合法命令时
 		if applyMsg.CommandValid {
 			op := applyMsg.Command.(Op)
@@ -145,38 +172,37 @@ func (kv *KVServer) ApplyCommand() {
 				//Get请求时
 				if value, ok := kv.kvData[op.Key]; ok {
 					//有该数据时
-					if op.ReplyCh != nil {
-						op.ReplyCh <- CommonReply{OK, value}
-					}
+					commonReply = CommonReply{OK, value}
 				} else {
 					//当没有数据时
-					if op.ReplyCh != nil {
-						op.ReplyCh <- CommonReply{ErrNoKey, ""}
-					}
+					commonReply = CommonReply{ErrNoKey, ""}
 				}
 			} else if op.CommandType == PutMethod {
 				//Put请求时
 				kv.kvData[op.Key] = op.Value
-				if op.ReplyCh != nil {
-					op.ReplyCh <- CommonReply{OK, op.Value}
-				}
+				commonReply = CommonReply{OK, op.Value}
 			} else if op.CommandType == AppendMethod {
 				//Append请求时
 				if value, ok := kv.kvData[op.Key]; ok {
 					//若已有该key,那么append就是拼接到value上
-					kv.kvData[op.Key] = value + op.Value
-					if op.ReplyCh != nil {
-						op.ReplyCh <- CommonReply{OK, value + op.Value}
-					}
+					newValue := value + op.Value
+					kv.kvData[op.Key] = newValue
+					commonReply = CommonReply{OK, newValue}
 				} else {
 					//若没有key,则效果和put相同
 					kv.kvData[op.Key] = op.Value
-					if op.ReplyCh != nil {
-						op.ReplyCh <- CommonReply{OK, op.Value}
-					}
+					commonReply = CommonReply{OK, op.Value}
 				}
 			}
-			//log.Printf("kvserver[%d]: 此时key=[%v],value=[%v]\n", kv.me, op.Key, kv.kvData[op.Key])
+			if op.ReplyCh != nil {
+				op.ReplyCh <- commonReply
+			}
+			log.Printf("kvserver[%d]: 此时key=[%v],value=[%v]\n", kv.me, op.Key, kv.kvData[op.Key])
+			//更新CommandId -> Reply
+			if op.ReplyCh != nil {
+				kv.opReply[op.CommandId] = commonReply
+				log.Printf("kvserver[%d]: 更新CommandId=[%d],Reply=[%v]\n", kv.me, op.CommandId, commonReply)
+			}
 		}
 		kv.mu.Unlock()
 	}
