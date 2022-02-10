@@ -47,7 +47,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-
+	CommandTerm  int //该log的term,以便上层应用可以根据term判断是否过期(index处期望的term和该term不同的情况)
 	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
@@ -890,6 +890,7 @@ func (rf *Raft) ApplyCommand() {
 				CommandValid: true,
 				Command:      entry.Command,
 				CommandIndex: entry.Index,
+				CommandTerm:  entry.Term,
 			}
 		}
 		rf.mu.Lock()
