@@ -12,7 +12,7 @@ import (
 
 const Debug = false
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
+func DPrintf(format string, a ...interface{}) {
 	if Debug {
 		log.Printf(format, a...)
 	}
@@ -72,9 +72,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 	//defer kv.mu.Unlock()
 	defer func() {
-		log.Printf("kvserver[%d]: 返回Get RPC请求,args=[%v];reply=[%v]\n", kv.me, args, reply)
+		DPrintf("kvserver[%d]: 返回Get RPC请求,args=[%v];reply=[%v]\n", kv.me, args, reply)
 	}()
-	log.Printf("kvserver[%d]: 接收Get RPC请求,args=[%v]\n", kv.me, args)
+	DPrintf("kvserver[%d]: 接收Get RPC请求,args=[%v]\n", kv.me, args)
 	//1.先判断该命令是否已经被执行过了
 	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
 		if commandContext.commandId >= args.CommandId {
@@ -131,9 +131,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	//defer kv.mu.Unlock()
 	defer func() {
-		log.Printf("kvserver[%d]: 返回PutAppend RPC请求,args=[%v];reply=[%v]\n", kv.me, args, reply)
+		DPrintf("kvserver[%d]: 返回PutAppend RPC请求,args=[%v];reply=[%v]\n", kv.me, args, reply)
 	}()
-	log.Printf("kvserver[%d]: 接收PutAppend RPC请求,args=[%v]\n", kv.me, args)
+	DPrintf("kvserver[%d]: 接收PutAppend RPC请求,args=[%v]\n", kv.me, args)
 	//1.先判断该命令是否已经被执行过了
 	//1.先判断该命令是否已经被执行过了
 	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
@@ -182,7 +182,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) ApplyCommand() {
 	for !kv.killed() {
 		applyMsg := <-kv.applyCh
-		log.Printf("kvserver[%d]: 获取到applyCh中新的applyMsg=[%v]\n", kv.me, applyMsg)
+		DPrintf("kvserver[%d]: 获取到applyCh中新的applyMsg=[%v]\n", kv.me, applyMsg)
 		kv.mu.Lock()
 		var commonReply ApplyNotifyMsg
 		//当为合法命令时
@@ -225,10 +225,10 @@ func (kv *KVServer) ApplyCommand() {
 			if replyCh, ok := kv.replyChMap[index]; ok {
 				replyCh <- commonReply
 			}
-			log.Printf("kvserver[%d]: 此时key=[%v],value=[%v]\n", kv.me, op.Key, kv.kvData[op.Key])
+			DPrintf("kvserver[%d]: 此时key=[%v],value=[%v]\n", kv.me, op.Key, kv.kvData[op.Key])
 			//更新clientReply
 			kv.clientReply[op.ClientId] = CommandContext{op.CommandId, commonReply}
-			log.Printf("kvserver[%d]: 更新ClientId=[%d],CommandId=[%d],Reply=[%v]\n", kv.me, op.ClientId, op.CommandId, commonReply)
+			DPrintf("kvserver[%d]: 更新ClientId=[%d],CommandId=[%d],Reply=[%v]\n", kv.me, op.ClientId, op.CommandId, commonReply)
 		}
 		kv.mu.Unlock()
 	}

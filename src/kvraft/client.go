@@ -54,19 +54,19 @@ func (ck *Clerk) Get(key string) string {
 		CommandId: ck.commandId,
 	}
 	reply := GetReply{}
-	//log.Printf("client: 开始发送Get RPC;args=[%v]\n", args)
+	DPrintf("client: 开始发送Get RPC;args=[%v]\n", args)
 	//第一个发送的目标server是上一次RPC发现的leader
 	serverId := ck.lastLeader
 	serverNum := len(ck.servers)
 	for ; ; serverId = (serverId + 1) % serverNum {
-		//log.Printf("client: 开始发送Get RPC;args=[%v]到server[%d]\n", args, serverId)
+		DPrintf("client: 开始发送Get RPC;args=[%v]到server[%d]\n", args, serverId)
 		ok := ck.servers[serverId].Call("KVServer.Get", &args, &reply)
 		//当发送失败或者返回不是leader时,则继续到下一个server进行尝试
 		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
-			//log.Printf("client: 发送Get RPC;args=[%v]到server[%d]失败,ok = %v,reply=[%v]\n", args, serverId, ok, reply)
+			DPrintf("client: 发送Get RPC;args=[%v]到server[%d]失败,ok = %v,reply=[%v]\n", args, serverId, ok, reply)
 			continue
 		}
-		//log.Printf("client: 发送Get RPC;args=[%v]到server[%d]成功,reply=[%v]\n", args, serverId, reply)
+		DPrintf("client: 发送Get RPC;args=[%v]到server[%d]成功,reply=[%v]\n", args, serverId, reply)
 		//若发送成功,则更新最近发现的leader
 		ck.lastLeader = serverId
 		ck.commandId++
@@ -99,7 +99,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 	reply := PutAppendReply{}
 	//第一个发送的目标server是上一次RPC发现的leader
-	////log.Printf("client: 开始发送PutAppend RPC;args=[%v]\n", args)
+	DPrintf("client: 开始发送PutAppend RPC;args=[%v]\n", args)
 	serverId := ck.lastLeader
 	serverNum := len(ck.servers)
 	for ; ; serverId = (serverId + 1) % serverNum {
@@ -108,7 +108,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
 			continue
 		}
-		////log.Printf("client: 发送PutAppend RPC;args=[%v]到server[%d]成功,reply=[%v]\n", args, serverId, reply)
+		DPrintf("client: 发送PutAppend RPC;args=[%v]到server[%d]成功,reply=[%v]\n", args, serverId, reply)
 		//若发送成功,则更新最近发现的leader以及commandId
 		ck.lastLeader = serverId
 		ck.commandId++
