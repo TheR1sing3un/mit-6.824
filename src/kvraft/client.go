@@ -39,11 +39,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // keeps trying forever in the face of all other errors.
 //
 // you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
+// ok := ck.servers[i].Call("KVServer.Get", &args, &Reply)
 //
-// the types of args and reply (including whether they are pointers)
+// the types of args and Reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
+// arguments. and Reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
 
@@ -63,10 +63,10 @@ func (ck *Clerk) Get(key string) string {
 		ok := ck.servers[serverId].Call("KVServer.Get", &args, &reply)
 		//当发送失败或者返回不是leader时,则继续到下一个server进行尝试
 		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
-			DPrintf("client: 发送Get RPC;args=[%v]到server[%d]失败,ok = %v,reply=[%v]\n", args, serverId, ok, reply)
+			DPrintf("client: 发送Get RPC;args=[%v]到server[%d]失败,ok = %v,Reply=[%v]\n", args, serverId, ok, reply)
 			continue
 		}
-		DPrintf("client: 发送Get RPC;args=[%v]到server[%d]成功,reply=[%v]\n", args, serverId, reply)
+		DPrintf("client: 发送Get RPC;args=[%v]到server[%d]成功,Reply=[%v]\n", args, serverId, reply)
 		//若发送成功,则更新最近发现的leader
 		ck.lastLeader = serverId
 		ck.commandId++
@@ -81,11 +81,11 @@ func (ck *Clerk) Get(key string) string {
 // shared by Put and Append.
 //
 // you can send an RPC with code like this:
-// ok := ck.servers[i].Call("KVServer.PutAppend", &args, &reply)
+// ok := ck.servers[i].Call("KVServer.PutAppend", &args, &Reply)
 //
-// the types of args and reply (including whether they are pointers)
+// the types of args and Reply (including whether they are pointers)
 // must match the declared types of the RPC handler function's
-// arguments. and reply must be passed as a pointer.
+// arguments. and Reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	//fmt.Println("key=", key, "value=", value, "op=", op)
@@ -108,7 +108,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
 			continue
 		}
-		DPrintf("client: 发送PutAppend RPC;args=[%v]到server[%d]成功,reply=[%v]\n", args, serverId, reply)
+		DPrintf("client: 发送PutAppend RPC;args=[%v]到server[%d]成功,Reply=[%v]\n", args, serverId, reply)
 		//若发送成功,则更新最近发现的leader以及commandId
 		ck.lastLeader = serverId
 		ck.commandId++

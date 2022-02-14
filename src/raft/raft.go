@@ -122,6 +122,15 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
+// GetRaftStateSize 获取当前raft状态的大小
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
+func (rf *Raft) GetSnapshot() []byte {
+	return rf.persister.ReadSnapshot()
+}
+
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -195,10 +204,6 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-func (rf *Raft) readSnapshot() {
-
-}
-
 //保存raft状态和snapshot
 func (rf *Raft) persistStateAndSnapshot() {
 	w := new(bytes.Buffer)
@@ -222,17 +227,18 @@ func (rf *Raft) persistStateAndSnapshot() {
 		return
 	}
 	data := w.Bytes()
-	//编码snapshot
-	wSnap := new(bytes.Buffer)
-	eSnap := labgob.NewEncoder(wSnap)
-	err = eSnap.Encode(rf.snapshotData)
-	if err != nil {
-		DPrintf("id[%d].state[%v].term[%d]: encode snapshot error: %v\n", rf.me, rf.state, rf.currentTerm, err)
-		return
-	}
-	dataSnap := wSnap.Bytes()
-	//持久化到persister
-	rf.persister.SaveStateAndSnapshot(data, dataSnap)
+	////编码snapshot
+	//wSnap := new(bytes.Buffer)
+	//eSnap := labgob.NewEncoder(wSnap)
+	//err = eSnap.Encode(rf.snapshotData)
+	//if err != nil {
+	//	DPrintf("id[%d].state[%v].term[%d]: encode snapshot error: %v\n", rf.me, rf.state, rf.currentTerm, err)
+	//	return
+	//}
+	//dataSnap := wSnap.Bytes()
+	////持久化到persister
+	//rf.persister.SaveStateAndSnapshot(data, dataSnap)
+	rf.persister.SaveStateAndSnapshot(data, rf.snapshotData)
 }
 
 //
