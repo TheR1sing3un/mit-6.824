@@ -10,10 +10,10 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
-	lastLeader int        //上一次RPC发现的主机id
-	mu         sync.Mutex //锁
-	clientId   int64      //client唯一id
-	commandId  int        //Command的唯一id
+	lastLeader           int        //上一次RPC发现的主机id
+	mu                   sync.Mutex //锁
+	clientId             int64      //client唯一id
+	lastAppliedCommandId int        //Command的唯一id
 }
 
 func nrand() int64 {
@@ -29,7 +29,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// You'll have to add code here.
 	ck.lastLeader = 0
 	ck.clientId = nrand()
-	ck.commandId = 0
+	ck.lastAppliedCommandId = 0
 	return ck
 }
 
@@ -48,10 +48,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	commandId := ck.lastAppliedCommandId + 1
 	args := GetArgs{
 		Key:       key,
 		ClientId:  ck.clientId,
-		CommandId: ck.commandId,
+		CommandId: commandId,
 	}
 	reply := GetReply{}
 	DPrintf("client: 开始发送Get RPC;args=[%v]\n", args)
@@ -69,7 +70,7 @@ func (ck *Clerk) Get(key string) string {
 		DPrintf("client: 发送Get RPC;args=[%v]到server[%d]成功,Reply=[%v]\n", args, serverId, reply)
 		//若发送成功,则更新最近发现的leader
 		ck.lastLeader = serverId
-		ck.commandId++
+		ck.lastAppliedCommandId = commandId
 		if reply.Err == ErrNoKey {
 			return ""
 		}
@@ -90,12 +91,13 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	//fmt.Println("key=", key, "value=", value, "op=", op)
 	// You will have to modify this function.
+	commandId := ck.lastAppliedCommandId + 1
 	args := PutAppendArgs{
 		Key:       key,
 		Value:     value,
 		Op:        op,
 		ClientId:  ck.clientId,
-		CommandId: ck.commandId,
+		CommandId: commandId,
 	}
 	reply := PutAppendReply{}
 	//第一个发送的目标server是上一次RPC发现的leader
@@ -111,7 +113,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		DPrintf("client: 发送PutAppend RPC;args=[%v]到server[%d]成功,Reply=[%v]\n", args, serverId, reply)
 		//若发送成功,则更新最近发现的leader以及commandId
 		ck.lastLeader = serverId
-		ck.commandId++
+		ck.lastAppliedCommandId = commandId
 		break
 	}
 }

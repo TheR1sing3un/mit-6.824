@@ -286,6 +286,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	if index > rf.lastLog().Index || index < rf.logEntries[0].Index {
+		return
+	}
 	//1.获取需要压缩末尾日志的数组内索引
 	realIndex := rf.binaryFindRealIndexInArrayByIndex(index)
 	lastLogEntry := rf.logEntries[realIndex]
@@ -680,9 +683,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 // UpdateCommitIndex 检查更新commitIndex
 func (rf *Raft) UpdateCommitIndex() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	for rf.state == LEADER {
+	for !rf.killed() {
+		time.Sleep(5 * time.Millisecond)
+		rf.mu.Lock()
+		if rf.state != LEADER {
+			rf.mu.Unlock()
+			return
+		}
 		//从lastLog开始
 		for i := rf.lastLog().Index; i > rf.commitIndex; i-- {
 			updateConNum := len(rf.peers) / 2
@@ -706,8 +713,6 @@ func (rf *Raft) UpdateCommitIndex() {
 			}
 		}
 		rf.mu.Unlock()
-		time.Sleep(1 * time.Millisecond)
-		rf.mu.Lock()
 	}
 }
 
@@ -860,7 +865,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 	rf.timeoutHeartBeat = 100
-	rf.timeoutElect = 500
+	rf.timeoutElect = 400
 	rf.timerHeartBeat = time.NewTimer(time.Duration(rf.timeoutHeartBeat) * time.Millisecond)
 	rf.timerElect = time.NewTimer(time.Duration(rf.timeoutElect) * time.Millisecond)
 	rf.applyCh = applyCh

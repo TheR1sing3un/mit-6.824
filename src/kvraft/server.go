@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -110,7 +110,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = replyMsg.Err
 		reply.Value = replyMsg.Value
 	case <-time.After(500 * time.Millisecond):
-		reply.Err = ErrWrongLeader
+		reply.Err = ErrTimeout
 	}
 	//5.清除chan
 	go kv.CloseChan(index)
@@ -119,6 +119,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) CloseChan(index int) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	ch, ok := kv.replyChMap[index]
+	if !ok {
+		//若该index没有保存通道,直接结束
+		return
+	}
+	close(ch)
 	delete(kv.replyChMap, index)
 }
 
@@ -167,7 +173,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = replyMsg.Err
 	case <-time.After(500 * time.Millisecond):
 		//超时,返回结果,但是不更新Command -> Reply
-		reply.Err = ErrWrongLeader
+		reply.Err = ErrTimeout
 	}
 	go kv.CloseChan(index)
 }
@@ -245,8 +251,7 @@ func (kv *KVServer) ApplyCommand(applyMsg raft.ApplyMsg) {
 
 //判断当前是否需要进行snapshot(90%则需要快照)
 func (kv *KVServer) needSnapshot() bool {
-	_, isLeader := kv.rf.GetState()
-	if !isLeader || kv.maxraftstate == -1 {
+	if kv.maxraftstate == -1 {
 		return false
 	}
 	var proportion float32
@@ -274,7 +279,7 @@ func (kv *KVServer) startSnapshot(index int) {
 	snapShotData := w.Bytes()
 	DPrintf("kvserver[%d]: 完成service层快照\n", kv.me)
 	//通知Raft进行快照
-	kv.rf.Snapshot(index, snapShotData)
+	go kv.rf.Snapshot(index, snapShotData)
 }
 
 // ApplySnapshot 被动应用snapshot
@@ -295,7 +300,7 @@ func (kv *KVServer) ApplySnapshot(msg raft.ApplyMsg) {
 	}
 	DPrintf("kvserver[%d]: 完成service层快照\n", kv.me)
 	//将其应用到raft层
-	kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
+	go kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
 }
 
 //
