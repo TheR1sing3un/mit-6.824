@@ -54,20 +54,20 @@ func (ck *Clerk) Get(key string) string {
 		ClientId:  ck.clientId,
 		CommandId: commandId,
 	}
-	reply := GetReply{}
-	DPrintf("client: 开始发送Get RPC;args=[%v]\n", args)
+	DPrintf("client[%d]: 开始发送Get RPC;args=[%v]\n", ck.clientId, args)
 	//第一个发送的目标server是上一次RPC发现的leader
 	serverId := ck.lastLeader
 	serverNum := len(ck.servers)
 	for ; ; serverId = (serverId + 1) % serverNum {
-		DPrintf("client: 开始发送Get RPC;args=[%v]到server[%d]\n", args, serverId)
+		var reply GetReply
+		DPrintf("client[%d]: 开始发送Get RPC;args=[%v]到server[%d]\n", ck.clientId, args, serverId)
 		ok := ck.servers[serverId].Call("KVServer.Get", &args, &reply)
 		//当发送失败或者返回不是leader时,则继续到下一个server进行尝试
 		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
-			DPrintf("client: 发送Get RPC;args=[%v]到server[%d]失败,ok = %v,Reply=[%v]\n", args, serverId, ok, reply)
+			DPrintf("client[%d]: 发送Get RPC;args=[%v]到server[%d]失败,ok = %v,Reply=[%v]\n", ck.clientId, args, serverId, ok, reply)
 			continue
 		}
-		DPrintf("client: 发送Get RPC;args=[%v]到server[%d]成功,Reply=[%v]\n", args, serverId, reply)
+		DPrintf("client[%d]: 发送Get RPC;args=[%v]到server[%d]成功,Reply=[%v]\n", ck.clientId, args, serverId, reply)
 		//若发送成功,则更新最近发现的leader
 		ck.lastLeader = serverId
 		ck.lastAppliedCommandId = commandId
@@ -99,22 +99,24 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ClientId:  ck.clientId,
 		CommandId: commandId,
 	}
-	reply := PutAppendReply{}
 	//第一个发送的目标server是上一次RPC发现的leader
-	DPrintf("client: 开始发送PutAppend RPC;args=[%v]\n", args)
+	DPrintf("client[%d]: 开始发送PutAppend RPC;args=[%v]\n", ck.clientId, args)
 	serverId := ck.lastLeader
 	serverNum := len(ck.servers)
 	for ; ; serverId = (serverId + 1) % serverNum {
+		var reply PutAppendReply
+		DPrintf("client[%d]: 开始发送PutAppend RPC;args=[%v]到server[%d]\n", ck.clientId, args, serverId)
 		ok := ck.servers[serverId].Call("KVServer.PutAppend", &args, &reply)
 		//当发送失败或者返回不是leader时,则继续到下一个server进行尝试
 		if !ok || reply.Err == ErrTimeout || reply.Err == ErrWrongLeader {
+			DPrintf("client[%d]: 发送PutAppend RPC;args=[%v]到server[%d]失败,ok = %v,Reply=[%v]\n", ck.clientId, args, serverId, ok, reply)
 			continue
 		}
-		DPrintf("client: 发送PutAppend RPC;args=[%v]到server[%d]成功,Reply=[%v]\n", args, serverId, reply)
+		DPrintf("client[%d]: 发送PutAppend RPC;args=[%v]到server[%d]成功,Reply=[%v]\n", ck.clientId, args, serverId, reply)
 		//若发送成功,则更新最近发现的leader以及commandId
 		ck.lastLeader = serverId
 		ck.lastAppliedCommandId = commandId
-		break
+		return
 	}
 }
 

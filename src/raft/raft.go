@@ -227,17 +227,6 @@ func (rf *Raft) persistStateAndSnapshot() {
 		return
 	}
 	data := w.Bytes()
-	////编码snapshot
-	//wSnap := new(bytes.Buffer)
-	//eSnap := labgob.NewEncoder(wSnap)
-	//err = eSnap.Encode(rf.snapshotData)
-	//if err != nil {
-	//	DPrintf("id[%d].state[%v].term[%d]: encode snapshot error: %v\n", rf.me, rf.state, rf.currentTerm, err)
-	//	return
-	//}
-	//dataSnap := wSnap.Bytes()
-	////持久化到persister
-	//rf.persister.SaveStateAndSnapshot(data, dataSnap)
 	rf.persister.SaveStateAndSnapshot(data, rf.snapshotData)
 }
 
@@ -365,18 +354,16 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		return
 	}
 	//5.通过applyCh传至service
-	go func() {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		applyMsg := ApplyMsg{
-			SnapshotValid: true,
-			Snapshot:      args.Data,
-			SnapshotIndex: args.LastIncludedIndex,
-			SnapshotTerm:  args.LastIncludedTerm,
-		}
-		rf.applyCh <- applyMsg
-		DPrintf("id[%d].state[%v].term[%d]: 将leader[%d]的快照:lastLogIndex[%d],lastLogTerm[%d]传到applyCh\n", rf.me, rf.state, rf.currentTerm, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
-	}()
+	applyMsg := ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotIndex: args.LastIncludedIndex,
+		SnapshotTerm:  args.LastIncludedTerm,
+	}
+	go func(msg ApplyMsg) {
+		rf.applyCh <- msg
+		//DPrintf("id[%d].state[%v].term[%d]: 将leader[%d]的快照:lastLogIndex[%d],lastLogTerm[%d]传到applyCh\n", rf.me, rf.state, rf.currentTerm, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
+	}(applyMsg)
 }
 
 //
@@ -420,7 +407,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = false
 	//1.如果Term<currentTerm或者已经投过票了,则之直接返回拒绝
 	if args.Term < rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor != -1 && rf.voteFor != args.CandidateId) {
-		reply.Term = rf.currentTerm
 		return
 	}
 	//2.如果t > currentTerm,则更新currentTerm,并切换为follower
@@ -433,6 +419,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//如果两份日志最后的条目的任期号不同,那么任期号大的日志更加新;如果两份日志最后的条目任期号相同,那么日志比较长的那个就更加新
 	if rf.lastLog().Term == -1 || args.LastLogTerm > rf.lastLog().Term || (args.LastLogTerm == rf.lastLog().Term && args.LastLogIndex >= rf.lastLog().Index) {
 		//重置选举时间
+		if rf.timerElect.Stop() {
+
+		}
 		rf.resetElectTimer()
 		//投票给候选人
 		rf.voteFor = args.CandidateId
@@ -584,7 +573,7 @@ func (rf *Raft) binaryFindFirstIndexByTerm(term int) int {
 
 //重置选举计时器
 func (rf *Raft) resetElectTimer() {
-	timeout := rand.Intn(400) + rf.timeoutElect
+	timeout := rand.Intn(300) + rf.timeoutElect
 	rf.timerElect.Reset(time.Duration(timeout) * time.Millisecond)
 	DPrintf("id[%d].state[%v].term[%d]: 重置选举计时器为[%d]ms\n", rf.me, rf.state, rf.currentTerm, timeout)
 }
@@ -751,10 +740,11 @@ func (rf *Raft) ticker() {
 				break
 			}
 			rf.mu.Lock()
+			//代表出现了,在reset之前已经到期的情况
 			DPrintf("id[%d].state[%v].term[%d]: 选举计时器到期\n", rf.me, rf.state, rf.currentTerm)
 			if rf.state != LEADER {
 				//当不为leader时,也就是超时了,那么转变为Candidate
-				go rf.StartElection()
+				rf.startElection()
 			}
 			//重置选举计时器
 			rf.resetElectTimer()
@@ -777,10 +767,10 @@ func (rf *Raft) ticker() {
 }
 
 // StartElection 发起选举
-func (rf *Raft) StartElection() {
-	voteCh := make(chan bool, len(rf.peers))
-	rf.mu.Lock()
+func (rf *Raft) startElection() {
 	rf.toCandidate()
+	rf.persist()
+	voteNums := 1
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
@@ -791,49 +781,27 @@ func (rf *Raft) StartElection() {
 			LastLogIndex: rf.lastLog().Index,
 			LastLogTerm:  rf.lastLog().Term,
 		}
-		reply := &RequestVoteReply{}
-		go func(i int, args *RequestVoteArgs, reply *RequestVoteReply) {
-			rf.mu.Lock()
-			DPrintf("id[%d].state[%v].term[%d]: 向 [%d] 申请选票\n", rf.me, rf.state, rf.currentTerm, i)
-			rf.mu.Unlock()
+		go func(i int) {
+			reply := &RequestVoteReply{}
 			ok := rf.sendRequestVote(i, args, reply)
-			if !ok {
+			if ok {
 				rf.mu.Lock()
-				DPrintf("id[%d].state[%v].term[%d]: request vote to [%d] error\n", rf.me, rf.state, rf.currentTerm, i)
-				rf.mu.Unlock()
-				voteCh <- false
-				return
+				defer rf.mu.Unlock()
+				if rf.currentTerm == args.Term && rf.state == CANDIDATE {
+					if reply.VoteGranted {
+						voteNums++
+						if voteNums > len(rf.peers)/2 {
+							go rf.ToLeader()
+						}
+					}
+				} else if reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.toFollower()
+					rf.voteFor = -1
+					rf.persist()
+				}
 			}
-			rf.mu.Lock()
-			//处理返回的term
-			if reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.toFollower()
-				rf.voteFor = -1
-				rf.persist()
-			}
-			rf.mu.Unlock()
-			voteCh <- reply.VoteGranted
-		}(i, args, reply)
-	}
-	rf.mu.Unlock()
-	i := 0
-	t := 0
-	for t < len(rf.peers)-1 {
-		voteOk := <-voteCh
-		t++
-		if voteOk {
-			i++
-		}
-		if i >= len(rf.peers)/2 {
-			//超过半数成为leader
-			rf.mu.Lock()
-			if rf.state == CANDIDATE {
-				go rf.ToLeader()
-			}
-			rf.mu.Unlock()
-			break
-		}
+		}(i)
 	}
 }
 
@@ -864,10 +832,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
-	rf.timeoutHeartBeat = 100
-	rf.timeoutElect = 400
+	rf.timeoutHeartBeat = 150
+	rf.timeoutElect = 300
 	rf.timerHeartBeat = time.NewTimer(time.Duration(rf.timeoutHeartBeat) * time.Millisecond)
-	rf.timerElect = time.NewTimer(time.Duration(rf.timeoutElect) * time.Millisecond)
+	rf.timerElect = time.NewTimer(time.Duration(rf.timeoutElect+rand.Intn(1000)) * time.Millisecond)
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
 	DPrintf("id[%d].state[%v].term[%d]: finish init\n", rf.me, rf.state, rf.currentTerm)
