@@ -499,19 +499,27 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	//追加
-	for i, logEntry := range args.Entries {
-		index := args.PrevLogIndex + i + 1
-		if index > rf.lastLog().Index {
-			rf.logEntries = append(rf.logEntries, logEntry)
-		} else if index <= rf.logEntries[0].Index {
-			//当追加的日志处于快照部分,那么直接跳过不处理该日志
-			continue
-		} else {
-			if rf.index(index).Term != logEntry.Term {
-				rf.logEntries = rf.logEntries[:rf.binaryFindRealIndexInArrayByIndex(index)] // 删除当前以及后续所有log
-				rf.logEntries = append(rf.logEntries, logEntry)                             // 把新log加入进来
-			}
-			// term一样啥也不用做，继续向后比对Log
+	//for i, logEntry := range args.Entries {
+	//	index := args.PrevLogIndex + i + 1
+	//	if index > rf.lastLog().Index {
+	//		rf.logEntries = append(rf.logEntries, logEntry)
+	//	} else if index <= rf.logEntries[0].Index {
+	//		//当追加的日志处于快照部分,那么直接跳过不处理该日志
+	//		continue
+	//	} else {
+	//		if rf.index(index).Term != logEntry.Term {
+	//			rf.logEntries = rf.logEntries[:rf.binaryFindRealIndexInArrayByIndex(index)] // 删除当前以及后续所有log
+	//			rf.logEntries = append(rf.logEntries, logEntry)                             // 把新log加入进来
+	//		}
+	//		// term一样啥也不用做，继续向后比对Log
+	//	}
+	//}
+
+	firstIndex := rf.logEntries[0].Index
+	for index, entry := range args.Entries {
+		if entry.Index-firstIndex >= len(rf.logEntries) || rf.logEntries[entry.Index-firstIndex].Term != entry.Term {
+			rf.logEntries = append(rf.logEntries[:entry.Index-firstIndex], args.Entries[index:]...)
+			break
 		}
 	}
 	if len(args.Entries) > 0 {
