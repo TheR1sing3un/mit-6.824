@@ -275,7 +275,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if index > rf.lastLog().Index || index < rf.logEntries[0].Index {
+	if index > rf.lastLog().Index || index < rf.logEntries[0].Index || index > rf.commitIndex {
 		return
 	}
 	//1.获取需要压缩末尾日志的数组内索引
@@ -488,6 +488,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("id[%d].state[%v].term[%d]: 追加日志的和现在的日志不匹配\n", rf.me, rf.state, rf.currentTerm)
 		return
 	}
+	if args.PrevLogIndex < rf.logEntries[0].Index {
+		reply.XTerm = -1
+		reply.Term = 0
+		reply.XLen = rf.logEntries[0].Index
+		reply.Success = false
+		return
+	}
 	//若preLogIndex处的日志的term和preLogTerm不相等(或者)
 	if rf.logEntries[0].Index <= args.PrevLogIndex && rf.index(args.PrevLogIndex).Term != args.PrevLogTerm {
 		reply.Success = false
@@ -499,29 +506,29 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	//追加
-	//for i, logEntry := range args.Entries {
-	//	index := args.PrevLogIndex + i + 1
-	//	if index > rf.lastLog().Index {
-	//		rf.logEntries = append(rf.logEntries, logEntry)
-	//	} else if index <= rf.logEntries[0].Index {
-	//		//当追加的日志处于快照部分,那么直接跳过不处理该日志
-	//		continue
-	//	} else {
-	//		if rf.index(index).Term != logEntry.Term {
-	//			rf.logEntries = rf.logEntries[:rf.binaryFindRealIndexInArrayByIndex(index)] // 删除当前以及后续所有log
-	//			rf.logEntries = append(rf.logEntries, logEntry)                             // 把新log加入进来
-	//		}
-	//		// term一样啥也不用做，继续向后比对Log
-	//	}
-	//}
-
-	firstIndex := rf.logEntries[0].Index
-	for index, entry := range args.Entries {
-		if entry.Index-firstIndex >= len(rf.logEntries) || rf.logEntries[entry.Index-firstIndex].Term != entry.Term {
-			rf.logEntries = append(rf.logEntries[:entry.Index-firstIndex], args.Entries[index:]...)
-			break
+	for i, logEntry := range args.Entries {
+		index := args.PrevLogIndex + i + 1
+		if index > rf.lastLog().Index {
+			rf.logEntries = append(rf.logEntries, logEntry)
+		} else if index <= rf.logEntries[0].Index {
+			//当追加的日志处于快照部分,那么直接跳过不处理该日志
+			continue
+		} else {
+			if rf.index(index).Term != logEntry.Term {
+				rf.logEntries = rf.logEntries[:rf.binaryFindRealIndexInArrayByIndex(index)] // 删除当前以及后续所有log
+				rf.logEntries = append(rf.logEntries, logEntry)                             // 把新log加入进来
+			}
+			// term一样啥也不用做，继续向后比对Log
 		}
 	}
+
+	//firstIndex := rf.logEntries[0].Index
+	//for index, entry := range args.Entries {
+	//	if entry.Index-firstIndex >= len(rf.logEntries) || rf.logEntries[entry.Index-firstIndex].Term != entry.Term {
+	//		rf.logEntries = append(rf.logEntries[:entry.Index-firstIndex], args.Entries[index:]...)
+	//		break
+	//	}
+	//}
 	if len(args.Entries) > 0 {
 		DPrintf("id[%d].state[%v].term[%d]: 追加后的的log=[%v]\n", rf.me, rf.state, rf.currentTerm, rf.logEntries)
 	}
@@ -975,6 +982,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		ok := rf.sendInstallSnapshot(server, &args, &reply)
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
+		defer rf.persist()
 		//过期的请求直接结束
 		if rf.state != LEADER || args.Term != rf.currentTerm {
 			return

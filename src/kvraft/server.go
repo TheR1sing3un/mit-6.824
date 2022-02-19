@@ -52,6 +52,7 @@ type KVServer struct {
 	clientReply map[int64]CommandContext    //客户端的唯一指令和响应的对应map
 	kvData      map[string]string           //kv数据
 	replyChMap  map[int]chan ApplyNotifyMsg //某index的响应的chan
+	lastApplied int                         //上一条应用的log的index,防止快照导致回退
 }
 
 // ApplyNotifyMsg 可表示GetReply和PutAppendReply
@@ -264,6 +265,7 @@ func (kv *KVServer) ApplyCommand(applyMsg raft.ApplyMsg) {
 	//更新clientReply
 	kv.clientReply[op.ClientId] = CommandContext{op.CommandId, commonReply}
 	DPrintf("kvserver[%d]: 更新ClientId=[%d],CommandId=[%d],Reply=[%v]\n", kv.me, op.ClientId, op.CommandId, commonReply)
+	//kv.lastApplied = applyMsg.CommandIndex
 	//判断是否需要快照
 	if kv.needSnapshot() {
 		kv.startSnapshot(applyMsg.CommandIndex)
@@ -308,20 +310,25 @@ func (kv *KVServer) ApplySnapshot(msg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	DPrintf("kvserver[%d]: 接收到leader的快照\n", kv.me)
-	//将快照中的service层数据进行加载
-	r := bytes.NewBuffer(msg.Snapshot)
-	d := labgob.NewDecoder(r)
-	var kvData map[string]string
-	var clientReply map[int64]CommandContext
-	if d.Decode(&kvData) != nil || d.Decode(&clientReply) != nil {
-		DPrintf("kvserver[%d]: decode error\n", kv.me)
-	} else {
-		kv.kvData = kvData
-		kv.clientReply = clientReply
+	if msg.SnapshotIndex < kv.lastApplied {
+		DPrintf("kvserver[%d]: 接收到旧的日志,snapshotIndex=[%d],状态机的lastApplied=[%d]\n", kv.me, msg.SnapshotIndex, kv.lastApplied)
+		return
 	}
-	DPrintf("kvserver[%d]: 完成service层快照\n", kv.me)
-	//将其应用到raft层
-	go kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot)
+	if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+		//kv.lastApplied = msg.SnapshotIndex
+		//将快照中的service层数据进行加载
+		r := bytes.NewBuffer(msg.Snapshot)
+		d := labgob.NewDecoder(r)
+		var kvData map[string]string
+		var clientReply map[int64]CommandContext
+		if d.Decode(&kvData) != nil || d.Decode(&clientReply) != nil {
+			DPrintf("kvserver[%d]: decode error\n", kv.me)
+		} else {
+			kv.kvData = kvData
+			kv.clientReply = clientReply
+		}
+		DPrintf("kvserver[%d]: 完成service层快照\n", kv.me)
+	}
 }
 
 //
