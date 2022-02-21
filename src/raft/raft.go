@@ -882,6 +882,7 @@ func (rf *Raft) ApplyCommand() {
 		rf.mu.Unlock()
 		//解锁后进行apply
 		for _, entry := range applyEntries {
+			//command := entry.Command
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      entry.Command,

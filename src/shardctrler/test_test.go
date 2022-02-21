@@ -397,6 +397,8 @@ func TestMulti(t *testing.T) {
 	}
 
 	c1 = ck.Query(-1)
+	DPrintf("c: %v\n", c)
+	DPrintf("c1: %v\n", c1)
 	check_same_config(t, c, c1)
 
 	fmt.Printf("  ... Passed\n")

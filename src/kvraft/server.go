@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {

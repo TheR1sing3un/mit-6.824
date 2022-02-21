@@ -1049,7 +1049,7 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 		}
 		if disconnect {
 			// reconnect a follower, who maybe behind and
-			// needs to rceive a snapshot to catch up.
+			// needs to receive a snapshot to catch up.
 			cfg.connect(victim)
 			cfg.one(rand.Int(), servers, true)
 			leader1 = cfg.checkOneLeader()

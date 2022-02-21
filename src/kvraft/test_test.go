@@ -1,6 +1,8 @@
 package kvraft
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -40,7 +42,9 @@ func (log *OpLog) Read() []porcupine.Operation {
 // get/put/putappend that keep counts
 func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 	start := time.Now().UnixNano()
+	//fmt.Println(cli, "start get key", key)
 	v := ck.Get(key)
+	//fmt.Println(cli, "finish put key", key)
 	end := time.Now().UnixNano()
 	cfg.op()
 	if log != nil {
@@ -58,7 +62,9 @@ func Get(cfg *config, ck *Clerk, key string, log *OpLog, cli int) string {
 
 func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
 	start := time.Now().UnixNano()
+	//fmt.Println(cli, "start put key", key, "value", value)
 	ck.Put(key, value)
+	//fmt.Println(cli, "finish put key", key, "value", value)
 	end := time.Now().UnixNano()
 	cfg.op()
 	if log != nil {
@@ -74,7 +80,9 @@ func Put(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) 
 
 func Append(cfg *config, ck *Clerk, key string, value string, log *OpLog, cli int) {
 	start := time.Now().UnixNano()
+	//fmt.Println(cli, "start append key", key, "value", value)
 	ck.Append(key, value)
+	//fmt.Println(cli, "finish append key", key, "value", value)
 	end := time.Now().UnixNano()
 	cfg.op()
 	if log != nil {
@@ -236,7 +244,6 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 
 	cfg.begin(title)
 	opLog := &OpLog{}
-
 	ck := cfg.makeClient(cfg.All())
 
 	done_partitioner := int32(0)
@@ -246,8 +253,9 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int)
 	}
+	//time.Sleep(1 * time.Second)
 	for i := 0; i < 3; i++ {
-		// log.Printf("Iteration %v\n", i)
+		DPrintf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
@@ -260,6 +268,8 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 				Put(cfg, myck, strconv.Itoa(cli), last, opLog, cli)
 			}
 			for atomic.LoadInt32(&done_clients) == 0 {
+				DPrintf("%d: client start an operation\n", cli)
+				//fmt.Printf("%d: client start an operation\n", cli)
 				var key string
 				if randomkeys {
 					key = strconv.Itoa(rand.Intn(nclients))
@@ -268,7 +278,8 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 				}
 				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 				if (rand.Int() % 1000) < 500 {
-					// log.Printf("%d: client new append %v\n", cli, nv)
+					DPrintf("%d: client new append %v\n", cli, nv)
+					//fmt.Printf("%d: client new append %v\n", cli, nv)
 					Append(cfg, myck, key, nv, opLog, cli)
 					if !randomkeys {
 						last = NextValue(last, nv)
@@ -277,10 +288,13 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 				} else if randomkeys && (rand.Int()%1000) < 100 {
 					// we only do this when using random keys, because it would break the
 					// check done after Get() operations
+					DPrintf("%d: client new put %v\n", cli, nv)
+					//fmt.Printf("%d: client new put %v\n", cli, nv)
 					Put(cfg, myck, key, nv, opLog, cli)
 					j++
 				} else {
-					// log.Printf("%d: client new get %v\n", cli, key)
+					DPrintf("%d: client new get %v\n", cli, key)
+					//fmt.Printf("%d: client new get %v\n", cli, key)
 					v := Get(cfg, myck, key, opLog, cli)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
@@ -299,9 +313,11 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 
 		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
+		DPrintf("将done_clients以及done_partitioner更改为1")
+		//fmt.Printf("将done_clients以及done_partitioner更改为1")
 
 		if partitions {
-			// log.Printf("wait for partitioner\n")
+			// DPrintf("wait for partitioner\n")
 			<-ch_partitioner
 			// reconnect network and submit a request. A client may
 			// have submitted a request in a minority.  That request
@@ -313,14 +329,16 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 		}
 
 		if crash {
-			// log.Printf("shutdown servers\n")
+			DPrintf("shutdown servers\n")
+			//fmt.Printf("shutdown servers\n")
 			for i := 0; i < nservers; i++ {
 				cfg.ShutdownServer(i)
 			}
 			// Wait for a while for servers to shutdown, since
 			// shutdown isn't a real crash and isn't instantaneous
 			time.Sleep(electionTimeout)
-			// log.Printf("restart servers\n")
+			DPrintf("restart servers\n")
+			//fmt.Printf("restart servers\n")
 			// crash and re-start all
 			for i := 0; i < nservers; i++ {
 				cfg.StartServer(i)
@@ -328,16 +346,20 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 			cfg.ConnectAll()
 		}
 
-		// log.Printf("wait for clients\n")
+		DPrintf("wait for clients\n")
+		//fmt.Printf("wait for clients\n")
 		for i := 0; i < nclients; i++ {
-			// log.Printf("read from clients %d\n", i)
+			DPrintf("read from clients %d\n", i)
+			//fmt.Printf("read from clients %d\n", i)
 			j := <-clnts[i]
 			// if j < 10 {
-			// 	log.Printf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
+			// 	DPrintf("Warning: client %d managed to perform only %d put operations in 1 sec?\n", i, j)
 			// }
 			key := strconv.Itoa(i)
-			// log.Printf("Check %v for client %d\n", j, i)
+			DPrintf("Check %v for client %d\n", j, i)
+			//fmt.Printf("Check %v for client %d\n", j, i)
 			v := Get(cfg, ck, key, opLog, 0)
+			//DPrintf("Get key = %v,value = %v from client %d\n", key, v, i)
 			if !randomkeys {
 				checkClntAppends(t, i, v, j)
 			}
@@ -399,6 +421,7 @@ func GenericTestSpeed(t *testing.T, part string, maxraftstate int) {
 	start := time.Now()
 	for i := 0; i < numOps; i++ {
 		ck.Append("x", "x 0 "+strconv.Itoa(i)+" y")
+		//DPrintf("now goroutine num = %d\n", runtime.NumGoroutine())
 	}
 	dur := time.Since(start)
 
