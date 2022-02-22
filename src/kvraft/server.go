@@ -128,7 +128,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) CloseChan(index int) {
 	kv.mu.Lock()
-	DPrintf("kvserver[%d]: 开始删除通道index: %d\n", kv.me, index)
+	//DPrintf("kvserver[%d]: 开始删除通道index: %d\n", kv.me, index)
 	defer kv.mu.Unlock()
 	ch, ok := kv.replyChMap[index]
 	if !ok {
@@ -226,12 +226,6 @@ func (kv *KVServer) ApplyCommand(applyMsg raft.ApplyMsg) {
 	if commandContext, ok := kv.clientReply[op.ClientId]; ok && commandContext.Command >= op.CommandId {
 		DPrintf("kvserver[%d]: 该命令已被应用过,applyMsg: %v, commandContext: %v\n", kv.me, applyMsg, commandContext)
 		commonReply = commandContext.Reply
-		//通知handler去响应请求
-		if replyCh, ok := kv.replyChMap[index]; ok {
-			DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知index = [%d]的channel\n", kv.me, applyMsg, index)
-			replyCh <- commonReply
-			DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知完成index = [%d]的channel\n", kv.me, applyMsg, index)
-		}
 		return
 	}
 	//当命令未被应用过

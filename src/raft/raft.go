@@ -104,8 +104,8 @@ type Raft struct {
 // LogEntry 日志条目
 type LogEntry struct {
 	Command interface{} //日志记录的命令(用于应用服务的命令)
-	Term    int         //该日志被接收的时候的Leader任期
 	Index   int         //该日志的索引
+	Term    int         //该日志被接收的时候的Leader任期
 }
 
 // GetState return currentTerm and whether this server
@@ -779,7 +779,7 @@ func (rf *Raft) ticker() {
 // StartElection 发起选举
 func (rf *Raft) startElection() {
 	rf.toCandidate()
-	rf.persist()
+	defer rf.persist()
 	voteNums := 1
 	for i := range rf.peers {
 		if i == rf.me {
@@ -808,7 +808,6 @@ func (rf *Raft) startElection() {
 					rf.currentTerm = reply.Term
 					rf.toFollower()
 					rf.voteFor = -1
-					rf.persist()
 				}
 			}
 		}(i)
@@ -977,7 +976,6 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		ok := rf.sendInstallSnapshot(server, &args, &reply)
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		defer rf.persist()
 		//过期的请求直接结束
 		if rf.state != LEADER || args.Term != rf.currentTerm {
 			return
@@ -990,6 +988,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 			rf.currentTerm = reply.Term
 			rf.toFollower()
 			rf.voteFor = -1
+			rf.persist()
 			DPrintf("id[%d].state[%v].term[%d]: 发送installSnapshot to [%d] 过期,转变为follower\n", rf.me, rf.state, rf.currentTerm, server)
 			return
 		}
@@ -1016,7 +1015,6 @@ func (rf *Raft) HandleAppendEntries(server int) {
 	ok := rf.sendAppendEntries(server, &args, &reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	defer rf.persist()
 	//过期的请求直接结束
 	if rf.state != LEADER || args.Term != rf.currentTerm {
 		return
@@ -1033,6 +1031,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		rf.toFollower()
 		//更新为未投票
 		rf.voteFor = -1
+		rf.persist()
 		DPrintf("id[%d].state[%v].term[%d]: 发送ae to [%d] 过期,转变为follower\n", rf.me, rf.state, rf.currentTerm, server)
 		return
 	}
