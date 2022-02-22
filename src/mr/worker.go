@@ -50,7 +50,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		if task.TaskType == "" {
 			log.Println("[worker]: 当前没有任务")
 			//当task为空时,没有请求到任务,sleep1秒后再次请求
-			time.Sleep(3 * time.Second)
+			time.Sleep(1 * time.Second)
 			continue
 		}
 		//成功获取到task

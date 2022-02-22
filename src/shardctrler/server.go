@@ -30,7 +30,7 @@ type Op struct {
 	GIDs      []int            // Leave命令的参数,需要删除的Group的ID
 	Shard     int              // Move命令的参数,需要移动的Shard的ID
 	GID       int              // Move命令的参数,需要移动到的Group的ID
-	Num       int              // Num命令的参数,查询的配置ID
+	Num       int              // Query命令的参数,查询的配置ID
 	SeqID     int64            // 该命令的唯一ID,用于Apply后的响应
 	ClientId  int64            // 客户端id
 	RequestId int              // 请求id
@@ -71,6 +71,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	DPrintf("ShardCtrler[%d]: 接收到client[%d],requestId=[%d]的Join请求: %v\n", sc.me, args.ClientId, args.RequestId, args)
 	reply.WrongLeader = false
 	sc.mu.Lock()
+	//判断是否是重复请求
 	if id, ok := sc.clientRequest[args.ClientId]; ok && args.RequestId <= id {
 		reply.Err = ErrRepeatRequest
 		sc.mu.Unlock()
@@ -78,7 +79,6 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	}
 	sc.mu.Unlock()
 	op := Op{
-		//判断是否是重复请求
 		CtrlType: Join,
 		Servers:  args.Servers,
 		SeqID:    nrand(),
@@ -118,10 +118,6 @@ func (sc *ShardCtrler) ApplyJoin(op Op) {
 	if config.Num == 1 {
 		//当前新增的组为第一组,那么直接添加新建
 		config.Groups = op.Servers
-		//添加新增的Groups
-		for gId, servers := range op.Servers {
-			config.Groups[gId] = servers
-		}
 		//完成shard -> gid
 		config.Shards = distributeShards(config.Groups)
 	} else {
@@ -395,7 +391,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	return sc
 }
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {

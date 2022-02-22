@@ -55,17 +55,17 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-//定义一个raft状态类
-type RaftState int
+// State 定义一个raft状态类
+type State int
 
 //枚举Raft状态
 const (
-	FOLLOWER  RaftState = 0
-	CANDIDATE RaftState = 1
-	LEADER    RaftState = 2
+	FOLLOWER  State = 0
+	CANDIDATE State = 1
+	LEADER    State = 2
 )
 
-//
+// Raft
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
@@ -83,17 +83,16 @@ type Raft struct {
 	currentTerm int        //当前任期
 	voteFor     int        //当前任期投给的候选人id(为-1时代表没有投票)
 	logEntries  []LogEntry //日志条目
-	//volatile state on all servers
-	state       RaftState //当前raft状态
-	commitIndex int       //当前log中的最高索引(从0开始,递增)
-	lastApplied int       //当前被用到状态机中的日志最高索引(从0开始,递增)
+	commitIndex int        //当前log中的最高索引(从0开始,递增)
+	lastApplied int        //当前被用到状态机中的日志最高索引(从0开始,递增)
 	//volatile state on leader
 	nextIndex  []int //发送给每台服务器的下一条日志目录索引(初始值为leader的commitIndex + 1)
 	matchIndex []int //每台服务器已知的已被复制的最高日志条目索引
+	//volatile state on all servers
+	state State //当前raft状态
 
-	//自定义参数
-	timerHeartBeat   *time.Timer   //心跳计时器
 	timerElect       *time.Timer   //选举计时器
+	timerHeartBeat   *time.Timer   //心跳计时器
 	timeoutHeartBeat int           //心跳频率/ms
 	timeoutElect     int           //选举频率/ms
 	applyCh          chan ApplyMsg //命令应用通道
@@ -102,14 +101,14 @@ type Raft struct {
 	snapshotData []byte //最近快照的数据
 }
 
-//日志条目
+// LogEntry 日志条目
 type LogEntry struct {
 	Command interface{} //日志记录的命令(用于应用服务的命令)
 	Term    int         //该日志被接收的时候的Leader任期
 	Index   int         //该日志的索引
 }
 
-// return currentTerm and whether this server
+// GetState return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	var term int
@@ -230,7 +229,7 @@ func (rf *Raft) persistStateAndSnapshot() {
 	rf.persister.SaveStateAndSnapshot(data, rf.snapshotData)
 }
 
-//
+// CondInstallSnapshot
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
 //
@@ -267,7 +266,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-// the service says it has created a snapshot that has
+// Snapshot the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the logEntries through (and including)
 // that index. Raft should now trim its logEntries as much as possible.
@@ -311,7 +310,7 @@ func (rf *Raft) binaryFindRealIndexInArrayByIndex(index int) int {
 	return len(rf.logEntries)
 }
 
-//快照安装RPC的参数
+// InstallSnapshotArgs 快照安装RPC的参数
 type InstallSnapshotArgs struct {
 	Term              int    //leader的任期
 	LeaderId          int    //leader的id
@@ -320,7 +319,7 @@ type InstallSnapshotArgs struct {
 	Data              []byte //快照数据
 }
 
-//快照安装的返回值
+// InstallSnapshotReply 快照安装的返回值
 type InstallSnapshotReply struct {
 	Term int //接收者的currentTerm
 }
@@ -366,7 +365,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}(applyMsg)
 }
 
-//
+// RequestVoteArgs
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
@@ -378,7 +377,7 @@ type RequestVoteArgs struct {
 	LastLogTerm  int //候选人最近一个Log的任期号
 }
 
-//
+// RequestVoteReply
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
@@ -388,7 +387,7 @@ type RequestVoteReply struct {
 	VoteGranted bool //是否投票
 }
 
-//
+// RequestVote
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
@@ -419,9 +418,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//如果两份日志最后的条目的任期号不同,那么任期号大的日志更加新;如果两份日志最后的条目任期号相同,那么日志比较长的那个就更加新
 	if rf.lastLog().Term == -1 || args.LastLogTerm > rf.lastLog().Term || (args.LastLogTerm == rf.lastLog().Term && args.LastLogIndex >= rf.lastLog().Index) {
 		//重置选举时间
-		if rf.timerElect.Stop() {
-
-		}
 		rf.resetElectTimer()
 		//投票给候选人
 		rf.voteFor = args.CandidateId
@@ -430,7 +426,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 }
 
-//日志追加RPC的请求参数
+// AppendEntriesArgs 日志追加RPC的请求参数
 type AppendEntriesArgs struct {
 	Term         int        //当前leader的任期
 	LeaderId     int        //leader的id,follower可以将client错发给它的请求转发给leader
@@ -440,7 +436,7 @@ type AppendEntriesArgs struct {
 	LeaderCommit int        //leader的commitIndex
 }
 
-//日志追加的RPC的返回值
+// AppendEntriesReply 日志追加的RPC的返回值
 type AppendEntriesReply struct {
 	Term    int  //接收者的currentTerm
 	Success bool //如果prevLogIndex和prevLogTerm和follower的匹配则返回true
@@ -449,7 +445,7 @@ type AppendEntriesReply struct {
 	XLen    int  //当XTerm为-1时,此时XLen记录follower的日志长度(不包含初始占位日志)
 }
 
-//日志追加的RPC handler
+// AppendEntries 日志追加的RPC handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -638,7 +634,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 	return ok
 }
 
-//
+// Start
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's logEntries. if this
 // server isn't the leader, returns false. otherwise start the
@@ -720,7 +716,7 @@ func (rf *Raft) UpdateCommitIndex() {
 	}
 }
 
-//
+// Kill
 // the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
@@ -755,7 +751,6 @@ func (rf *Raft) ticker() {
 				break
 			}
 			rf.mu.Lock()
-			//代表出现了,在reset之前已经到期的情况
 			DPrintf("id[%d].state[%v].term[%d]: 选举计时器到期\n", rf.me, rf.state, rf.currentTerm)
 			if rf.state != LEADER {
 				//当不为leader时,也就是超时了,那么转变为Candidate
@@ -820,7 +815,7 @@ func (rf *Raft) startElection() {
 	}
 }
 
-//
+// Make
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -877,12 +872,11 @@ func (rf *Raft) ApplyCommand() {
 		commitIndex := rf.commitIndex
 		lastApplied := rf.lastApplied
 		DPrintf("id[%d].state[%v].term[%d]: apply command [%d,%d]\n", rf.me, rf.state, rf.currentTerm, lastApplied+1, commitIndex)
-		applyEntries := make([]LogEntry, rf.commitIndex-rf.lastApplied)
+		var applyEntries = make([]LogEntry, rf.commitIndex-rf.lastApplied, rf.commitIndex-rf.lastApplied)
 		copy(applyEntries, rf.logEntries[rf.binaryFindRealIndexInArrayByIndex(lastApplied+1):rf.binaryFindRealIndexInArrayByIndex(commitIndex+1)])
 		rf.mu.Unlock()
 		//解锁后进行apply
 		for _, entry := range applyEntries {
-			//command := entry.Command
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      entry.Command,
@@ -915,7 +909,7 @@ func (rf *Raft) ToLeader() {
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	//初始化nextIndex为commitIndex+1
-	for i, _ := range rf.nextIndex {
+	for i := range rf.nextIndex {
 		rf.nextIndex[i] = rf.commitIndex + 1
 	}
 	//初始化matchIndex为0(实例化的时候已经赋值0了,不需要自己再赋值一次了)

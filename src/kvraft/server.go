@@ -150,7 +150,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}()
 	DPrintf("kvserver[%d]: 接收PutAppend RPC请求,args=[%v]\n", kv.me, args)
 	//1.先判断该命令是否已经被执行过了
-	//1.先判断该命令是否已经被执行过了
 	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
 		//若该命令已被执行了,直接返回刚刚返回的结果
 		if commandContext.Command == args.CommandId {
@@ -223,9 +222,16 @@ func (kv *KVServer) ApplyCommand(applyMsg raft.ApplyMsg) {
 	var commonReply ApplyNotifyMsg
 	op := applyMsg.Command.(Op)
 	index := applyMsg.CommandIndex
-	//当命令已经被应用过了(不管该命令了,让server那边超时即可)
+	//当命令已经被应用过了
 	if commandContext, ok := kv.clientReply[op.ClientId]; ok && commandContext.Command >= op.CommandId {
 		DPrintf("kvserver[%d]: 该命令已被应用过,applyMsg: %v, commandContext: %v\n", kv.me, applyMsg, commandContext)
+		commonReply = commandContext.Reply
+		//通知handler去响应请求
+		if replyCh, ok := kv.replyChMap[index]; ok {
+			DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知index = [%d]的channel\n", kv.me, applyMsg, index)
+			replyCh <- commonReply
+			DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知完成index = [%d]的channel\n", kv.me, applyMsg, index)
+		}
 		return
 	}
 	//当命令未被应用过
@@ -331,7 +337,7 @@ func (kv *KVServer) ApplySnapshot(msg raft.ApplyMsg) {
 	}
 }
 
-//
+// Kill
 // the tester calls Kill() when a KVServer instance won't
 // be needed again. for your convenience, we supply
 // code to set rf.dead (without needing a lock),
@@ -352,7 +358,7 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
-//
+// StartKVServer
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant key/value service.
