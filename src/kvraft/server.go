@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -265,7 +265,7 @@ func (kv *KVServer) ApplyCommand(applyMsg raft.ApplyMsg) {
 	//更新clientReply
 	kv.clientReply[op.ClientId] = CommandContext{op.CommandId, commonReply}
 	DPrintf("kvserver[%d]: 更新ClientId=[%d],CommandId=[%d],Reply=[%v]\n", kv.me, op.ClientId, op.CommandId, commonReply)
-	//kv.lastApplied = applyMsg.CommandIndex
+	kv.lastApplied = applyMsg.CommandIndex
 	//判断是否需要快照
 	if kv.needSnapshot() {
 		kv.startSnapshot(applyMsg.CommandIndex)
@@ -315,7 +315,7 @@ func (kv *KVServer) ApplySnapshot(msg raft.ApplyMsg) {
 		return
 	}
 	if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
-		//kv.lastApplied = msg.SnapshotIndex
+		kv.lastApplied = msg.SnapshotIndex
 		//将快照中的service层数据进行加载
 		r := bytes.NewBuffer(msg.Snapshot)
 		d := labgob.NewDecoder(r)

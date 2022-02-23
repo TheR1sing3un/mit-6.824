@@ -361,7 +361,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	go func(msg ApplyMsg) {
 		rf.applyCh <- msg
-		//DPrintf("id[%d].state[%v].term[%d]: 将leader[%d]的快照:lastLogIndex[%d],lastLogTerm[%d]传到applyCh\n", rf.me, rf.state, rf.currentTerm, args.LeaderId, args.LastIncludedIndex, args.LastIncludedTerm)
 	}(applyMsg)
 }
 
@@ -850,6 +849,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	DPrintf("id[%d].state[%v].term[%d]: finish init\n", rf.me, rf.state, rf.currentTerm)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.snapshotData = persister.snapshot
 	rf.lastApplied = rf.logEntries[0].Index
 	rf.commitIndex = rf.logEntries[0].Index
 	// start ticker goroutine to start elections
