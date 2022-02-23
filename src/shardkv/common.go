@@ -1,5 +1,7 @@
 package shardkv
 
+import "log"
+
 //
 // Sharded key/value server.
 // Lots of replica groups, each running Raft.
@@ -8,6 +10,15 @@ package shardkv
 //
 // You will have to modify these definitions.
 //
+
+const Debug = true
+
+func DPrintf(format string, a ...interface{}) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 type CommandType string
 

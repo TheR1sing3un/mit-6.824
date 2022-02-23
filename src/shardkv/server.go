@@ -12,15 +12,6 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = false
-
-func DPrintf(format string, a ...interface{}) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
-}
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
@@ -43,13 +34,16 @@ type ShardKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	clientReply    map[int64]CommandContext    //客户端的唯一指令和响应的对应map
-	kvDataBase     KvDataBase                  //数据库,可自行定义和更换
-	storeInterface store                       //数据库接口
-	replyChMap     map[int]chan ApplyNotifyMsg //某index的响应的chan
-	lastApplied    int                         //上一条应用的log的index,防止快照导致回退
-	mck            *shardctrler.Clerk          //和shardctrler交互
-	dead           int32                       //是否已关闭
+	clientReply         map[int64]CommandContext    //客户端的唯一指令和响应的对应map
+	kvDataBase          KvDataBase                  //数据库,可自行定义和更换
+	storeInterface      store                       //数据库接口
+	replyChMap          map[int]chan ApplyNotifyMsg //某index的响应的chan
+	lastApplied         int                         //上一条应用的log的index,防止快照导致回退
+	mck                 *shardctrler.Clerk          //和shardctrler交互
+	config              shardctrler.Config          //当前的配置
+	dead                int32                       //是否已关闭
+	timerUpdateConfig   *time.Timer                 //更新配置的定时器
+	timeoutUpdateConfig int                         //更新配置的轮询周期(/ms)
 }
 
 // ApplyNotifyMsg 可表示GetReply和PutAppendReply
@@ -66,15 +60,28 @@ type CommandContext struct {
 	Reply   ApplyNotifyMsg //该command的响应
 }
 
+//该集群对该分片
+func (kv *ShardKV) responsibleForShard(shard int) bool {
+	gId := kv.config.Shards[shard]
+	return gId == kv.gid
+}
+
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	// Your code here.
 	kv.mu.Lock()
-	//defer kv.mu.Unlock()
 	defer func() {
 		DPrintf("kvserver[%d]: 返回Get RPC请求,args=[%v];Reply=[%v]\n", kv.me, args, reply)
 	}()
 	DPrintf("kvserver[%d]: 接收Get RPC请求,args=[%v]\n", kv.me, args)
+	shard := key2shard(args.Key)
+	if !kv.responsibleForShard(shard) {
+		//若该副本组不负责该key
+		reply.Err = ErrWrongGroup
+		DPrintf("shardkv[%d][%d]: 该副本组不负责该key=[%v],shard=[%d],shard belong to: [%d]\n", kv.gid, kv.me, args.Key, shard, kv.config.Shards[shard])
+		kv.mu.Unlock()
+		return
+	}
 	//1.先判断该命令是否已经被执行过了
 	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
 		if commandContext.Command >= args.RequestId {
@@ -97,7 +104,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	//3.若不为leader则直接返回Err
 	if !isLeader {
 		reply.Err = ErrWrongLeader
-		//kv.mu.Unlock()
 		return
 	}
 	replyCh := make(chan ApplyNotifyMsg, 1)
@@ -140,6 +146,67 @@ func (kv *ShardKV) CloseChan(index int) {
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	// Your code here.
+	kv.mu.Lock()
+	//defer kv.mu.Unlock()
+	defer func() {
+		DPrintf("kvserver[%d]: 返回PutAppend RPC请求,args=[%v];Reply=[%v]\n", kv.me, args, reply)
+	}()
+	DPrintf("kvserver[%d]: 接收PutAppend RPC请求,args=[%v]\n", kv.me, args)
+	shard := key2shard(args.Key)
+	if !kv.responsibleForShard(shard) {
+		//若该副本组不负责该key
+		reply.Err = ErrWrongGroup
+		DPrintf("shardkv[%d][%d]: 该副本组不负责该key=[%v],shard=[%d],shard belong to: [%d]\n", kv.gid, kv.me, args.Key, shard, kv.config.Shards[shard])
+		kv.mu.Unlock()
+		return
+	}
+	//1.先判断该命令是否已经被执行过了
+	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
+		//若该命令已被执行了,直接返回刚刚返回的结果
+		if commandContext.Command == args.RequestId {
+			//若当前的请求已经被执行过了,那么直接返回结果
+			reply.Err = commandContext.Reply.Err
+			DPrintf("kvserver[%d]: CommandId=[%d]==CommandContext.CommandId=[%d] ,直接返回: %v\n", kv.me, args.RequestId, commandContext.Command, reply)
+			kv.mu.Unlock()
+			return
+		}
+	}
+	kv.mu.Unlock()
+	//2.若命令未被执行,那么开始生成Op并传递给raft
+	op := Op{
+		CommandType: CommandType(args.Op),
+		Key:         args.Key,
+		Value:       args.Value,
+		ClientId:    args.ClientId,
+		CommandId:   args.RequestId,
+	}
+	index, term, isLeader := kv.rf.Start(op)
+	//3.若不为leader则直接返回Err
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	replyCh := make(chan ApplyNotifyMsg, 1)
+	kv.mu.Lock()
+	kv.replyChMap[index] = replyCh
+	DPrintf("kvserver[%d]: 创建reply通道:index=[%d]\n", kv.me, index)
+	kv.mu.Unlock()
+	//4.等待应用后返回消息
+	select {
+	case replyMsg := <-replyCh:
+		//当被通知时,返回结果
+		if term == replyMsg.Term {
+			reply.Err = replyMsg.Err
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(500 * time.Millisecond):
+		//超时,返回结果,但是不更新Command -> Reply
+		reply.Err = ErrTimeout
+		DPrintf("kvserver[%d]: 处理请求超时: %v\n", kv.me, op)
+	}
+	go kv.CloseChan(index)
 }
 
 //
@@ -159,63 +226,6 @@ func (kv *ShardKV) killed() bool {
 	return z == 1
 }
 
-//
-// servers[] contains the ports of the servers in this group.
-//
-// me is the index of the current server in servers[].
-//
-// the k/v server should store snapshots through the underlying Raft
-// implementation, which should call persister.SaveStateAndSnapshot() to
-// atomically save the Raft state along with the snapshot.
-//
-// the k/v server should snapshot when Raft's saved state exceeds
-// maxraftstate bytes, in order to allow Raft to garbage-collect its
-// log. if maxraftstate is -1, you don't need to snapshot.
-//
-// gid is this group's GID, for interacting with the shardctrler.
-//
-// pass ctrlers[] to shardctrler.MakeClerk() so you can send
-// RPCs to the shardctrler.
-//
-// make_end(servername) turns a server name from a
-// Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
-// send RPCs. You'll need this to send RPCs to other groups.
-//
-// look at client.go for examples of how to use ctrlers[]
-// and make_end() to send RPCs to the group owning a specific shard.
-//
-// StartServer() must return quickly, so it should start goroutines
-// for any long-running work.
-//
-func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
-	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
-
-	kv := new(ShardKV)
-	kv.me = me
-	kv.maxraftstate = maxraftstate
-	kv.make_end = make_end
-	kv.gid = gid
-	kv.ctrlers = ctrlers
-
-	// Your initialization code here.
-	kv.clientReply = make(map[int64]CommandContext)
-	kv.kvDataBase = KvDataBase{make(map[string]string)}
-	kv.storeInterface = &kv.kvDataBase
-	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
-	//从快照中恢复数据
-	kv.readSnapshot(kv.rf.GetSnapshot())
-	go kv.ReceiveApplyMsg()
-
-	// Use something like this to talk to the shardctrler:
-	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	return kv
-}
 func (kv *ShardKV) readSnapshot(snapshot []byte) {
 	if snapshot == nil || len(snapshot) < 1 {
 		return
@@ -230,6 +240,20 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 		kv.kvDataBase = kvDataBase
 		kv.clientReply = clientReply
 		kv.storeInterface = &kvDataBase
+	}
+}
+
+// UpdateConfig 轮询更新配置
+func (kv *ShardKV) UpdateConfig() {
+	for !kv.killed() {
+		select {
+		case <-kv.timerUpdateConfig.C:
+			//更新配置
+			kv.mu.Lock()
+			kv.config = kv.mck.Query(-1)
+			kv.timerUpdateConfig.Reset(time.Duration(kv.timeoutUpdateConfig) * time.Millisecond)
+			kv.mu.Unlock()
+		}
 	}
 }
 
@@ -334,6 +358,7 @@ func (kv *ShardKV) createSnapshot() []byte {
 	if err != nil {
 		log.Fatalf("kvserver[%d]: encode clientReply error: %v\n", kv.me, err)
 	}
+	//编码config
 	snapshotData := w.Bytes()
 	return snapshotData
 }
@@ -353,6 +378,69 @@ func (kv *ShardKV) ApplySnapshot(msg raft.ApplyMsg) {
 		kv.readSnapshot(msg.Snapshot)
 		DPrintf("kvserver[%d]: 完成service层快照\n", kv.me)
 	}
+}
+
+// StartServer
+// servers[] contains the ports of the servers in this group.
+//
+// me is the index of the current server in servers[].
+//
+// the k/v server should store snapshots through the underlying Raft
+// implementation, which should call persister.SaveStateAndSnapshot() to
+// atomically save the Raft state along with the snapshot.
+//
+// the k/v server should snapshot when Raft's saved state exceeds
+// maxraftstate bytes, in order to allow Raft to garbage-collect its
+// log. if maxraftstate is -1, you don't need to snapshot.
+//
+// gid is this group's GID, for interacting with the shardctrler.
+//
+// pass ctrlers[] to shardctrler.MakeClerk() so you can send
+// RPCs to the shardctrler.
+//
+// make_end(servername) turns a server name from a
+// Config.Groups[gid][i] into a labrpc.ClientEnd on which you can
+// send RPCs. You'll need this to send RPCs to other groups.
+//
+// look at client.go for examples of how to use ctrlers[]
+// and make_end() to send RPCs to the group owning a specific shard.
+//
+// StartServer() must return quickly, so it should start goroutines
+// for any long-running work.
+//
+func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int, gid int, ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *ShardKV {
+	// call labgob.Register on structures you want
+	// Go's RPC library to marshall/unmarshall.
+	labgob.Register(Op{})
+
+	kv := new(ShardKV)
+	kv.me = me
+	kv.maxraftstate = maxraftstate
+	kv.make_end = make_end
+	kv.gid = gid
+	kv.ctrlers = ctrlers
+
+	// Your initialization code here.
+	kv.clientReply = make(map[int64]CommandContext)
+	kv.kvDataBase = KvDataBase{make(map[string]string)}
+	kv.storeInterface = &kv.kvDataBase
+	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
+
+	// Use something like this to talk to the shardctrler:
+	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
+
+	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	//获取当前最新的配置
+	config := kv.mck.Query(-1)
+	kv.config = config
+	kv.timeoutUpdateConfig = 100
+	kv.timerUpdateConfig = time.NewTimer(time.Duration(kv.timeoutUpdateConfig) * time.Millisecond)
+	//从快照中恢复数据
+	kv.readSnapshot(kv.rf.GetSnapshot())
+	go kv.ReceiveApplyMsg()
+	go kv.UpdateConfig()
+	return kv
 }
 
 type store interface {

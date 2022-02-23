@@ -288,7 +288,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 				} else if randomkeys && (rand.Int()%1000) < 100 {
 					// we only do this when using random keys, because it would break the
 					// check done after Get() operations
-					DPrintf("%d: client new put %v\n", cli, nv)
+					DPrintf("%d: client random new put %v\n", cli, nv)
 					//fmt.Printf("%d: client new put %v\n", cli, nv)
 					Put(cfg, myck, key, nv, opLog, cli)
 					j++
