@@ -9,16 +9,25 @@ package shardkv
 // You will have to modify these definitions.
 //
 
+type CommandType string
+
+const (
+	PutMethod    = "Put"
+	AppendMethod = "Append"
+	GetMethod    = "Get"
+)
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+	ErrTimeout     = "ErrTimeout"
 )
 
 type Err string
 
-// Put or Append
+// PutAppendArgs Put or Append
 type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	Key   string
@@ -27,6 +36,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ClientId  int64 //client的唯一id
+	RequestId int   //客户端请求的id
 }
 
 type PutAppendReply struct {
@@ -36,6 +47,8 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	ClientId  int64 //client的唯一id
+	RequestId int   //客户端请求的id
 }
 
 type GetReply struct {

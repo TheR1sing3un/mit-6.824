@@ -11,22 +11,11 @@ import (
 	"time"
 )
 
-const Debug = true
-
-func DPrintf(format string, a ...interface{}) {
-	if Debug {
-		log.Printf(format, a...)
-	}
-	return
+type store interface {
+	Get(key string) (value string, ok bool)
+	Put(key string, value string) (newValue string)
+	Append(key string, arg string) (newValue string)
 }
-
-type CommandType string
-
-const (
-	PutMethod    = "Put"
-	AppendMethod = "Append"
-	GetMethod    = "Get"
-)
 
 type Op struct {
 	// Your definitions here.
@@ -49,10 +38,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	clientReply map[int64]CommandContext    //客户端的唯一指令和响应的对应map
-	kvData      map[string]string           //kv数据
-	replyChMap  map[int]chan ApplyNotifyMsg //某index的响应的chan
-	lastApplied int                         //上一条应用的log的index,防止快照导致回退
+	clientReply    map[int64]CommandContext    //客户端的唯一指令和响应的对应map
+	kvDataBase     KvDataBase                  //数据库,可自行定义和更换
+	storeInterface store                       //数据库接口
+	replyChMap     map[int]chan ApplyNotifyMsg //某index的响应的chan
+	lastApplied    int                         //上一条应用的log的index,防止快照导致回退
 }
 
 // ApplyNotifyMsg 可表示GetReply和PutAppendReply
@@ -231,29 +221,21 @@ func (kv *KVServer) ApplyCommand(applyMsg raft.ApplyMsg) {
 	//当命令未被应用过
 	if op.CommandType == GetMethod {
 		//Get请求时
-		if value, ok := kv.kvData[op.Key]; ok {
+		if value, ok := kv.storeInterface.Get(op.Key); ok {
 			//有该数据时
 			commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
 		} else {
 			//当没有数据时
-			commonReply = ApplyNotifyMsg{ErrNoKey, "", applyMsg.CommandTerm}
+			commonReply = ApplyNotifyMsg{ErrNoKey, value, applyMsg.CommandTerm}
 		}
 	} else if op.CommandType == PutMethod {
 		//Put请求时
-		kv.kvData[op.Key] = op.Value
-		commonReply = ApplyNotifyMsg{OK, op.Value, applyMsg.CommandTerm}
+		value := kv.storeInterface.Put(op.Key, op.Value)
+		commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
 	} else if op.CommandType == AppendMethod {
 		//Append请求时
-		if value, ok := kv.kvData[op.Key]; ok {
-			//若已有该key,那么append就是拼接到value上
-			newValue := value + op.Value
-			kv.kvData[op.Key] = newValue
-			commonReply = ApplyNotifyMsg{OK, newValue, applyMsg.CommandTerm}
-		} else {
-			//若没有key,则效果和put相同
-			kv.kvData[op.Key] = op.Value
-			commonReply = ApplyNotifyMsg{OK, op.Value, applyMsg.CommandTerm}
-		}
+		newValue := kv.storeInterface.Append(op.Key, op.Value)
+		commonReply = ApplyNotifyMsg{OK, newValue, applyMsg.CommandTerm}
 	}
 	//通知handler去响应请求
 	if replyCh, ok := kv.replyChMap[index]; ok {
@@ -261,7 +243,8 @@ func (kv *KVServer) ApplyCommand(applyMsg raft.ApplyMsg) {
 		replyCh <- commonReply
 		DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知完成index = [%d]的channel\n", kv.me, applyMsg, index)
 	}
-	DPrintf("kvserver[%d]: 此时key=[%v],value=[%v]\n", kv.me, op.Key, kv.kvData[op.Key])
+	value, _ := kv.storeInterface.Get(op.Key)
+	DPrintf("kvserver[%d]: 此时key=[%v],value=[%v]\n", kv.me, op.Key, value)
 	//更新clientReply
 	kv.clientReply[op.ClientId] = CommandContext{op.CommandId, commonReply}
 	DPrintf("kvserver[%d]: 更新ClientId=[%d],CommandId=[%d],Reply=[%v]\n", kv.me, op.ClientId, op.CommandId, commonReply)
@@ -285,24 +268,28 @@ func (kv *KVServer) needSnapshot() bool {
 //主动开始snapshot(由leader在maxRaftState不为-1,而且目前接近阈值的时候调用)
 func (kv *KVServer) startSnapshot(index int) {
 	DPrintf("kvserver[%d]: 容量接近阈值,进行快照,rateStateSize=[%d],maxRaftState=[%d]\n", kv.me, kv.rf.GetRaftStateSize(), kv.maxraftstate)
+	snapshot := kv.createSnapshot()
+	DPrintf("kvserver[%d]: 完成service层快照\n", kv.me)
+	//通知Raft进行快照
+	go kv.rf.Snapshot(index, snapshot)
+}
+
+//生成server的状态的snapshot
+func (kv *KVServer) createSnapshot() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	//编码kv数据
-	err := e.Encode(kv.kvData)
+	err := e.Encode(kv.kvDataBase)
 	if err != nil {
-		DPrintf("kvserver[%d]: encode kvData error: %v\n", kv.me, err)
-		return
+		log.Fatalf("kvserver[%d]: encode kvData error: %v\n", kv.me, err)
 	}
 	//编码clientReply(为了去重)
 	err = e.Encode(kv.clientReply)
 	if err != nil {
-		DPrintf("kvserver[%d]: encode clientReply error: %v\n", kv.me, err)
-		return
+		log.Fatalf("kvserver[%d]: encode clientReply error: %v\n", kv.me, err)
 	}
-	snapShotData := w.Bytes()
-	DPrintf("kvserver[%d]: 完成service层快照\n", kv.me)
-	//通知Raft进行快照
-	go kv.rf.Snapshot(index, snapShotData)
+	snapshotData := w.Bytes()
+	return snapshotData
 }
 
 // ApplySnapshot 被动应用snapshot
@@ -317,16 +304,7 @@ func (kv *KVServer) ApplySnapshot(msg raft.ApplyMsg) {
 	if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
 		kv.lastApplied = msg.SnapshotIndex
 		//将快照中的service层数据进行加载
-		r := bytes.NewBuffer(msg.Snapshot)
-		d := labgob.NewDecoder(r)
-		var kvData map[string]string
-		var clientReply map[int64]CommandContext
-		if d.Decode(&kvData) != nil || d.Decode(&clientReply) != nil {
-			DPrintf("kvserver[%d]: decode error\n", kv.me)
-		} else {
-			kv.kvData = kvData
-			kv.clientReply = clientReply
-		}
+		kv.readSnapshot(msg.Snapshot)
 		DPrintf("kvserver[%d]: 完成service层快照\n", kv.me)
 	}
 }
@@ -381,27 +359,28 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	// You may need initialization code here.
 	kv.clientReply = make(map[int64]CommandContext)
-	kv.kvData = make(map[string]string)
+	kv.kvDataBase = KvDataBase{make(map[string]string)}
+	kv.storeInterface = &kv.kvDataBase
 	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
 	//从快照中恢复数据
-	kv.readSnapshot()
+	kv.readSnapshot(kv.rf.GetSnapshot())
 	go kv.ReceiveApplyMsg()
 	return kv
 }
 
-func (kv *KVServer) readSnapshot() {
-	snapshot := kv.rf.GetSnapshot()
+func (kv *KVServer) readSnapshot(snapshot []byte) {
 	if snapshot == nil || len(snapshot) < 1 {
 		return
 	}
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
-	var kvData map[string]string
+	var kvDataBase KvDataBase
 	var clientReply map[int64]CommandContext
-	if d.Decode(&kvData) != nil || d.Decode(&clientReply) != nil {
+	if d.Decode(&kvDataBase) != nil || d.Decode(&clientReply) != nil {
 		DPrintf("kvserver[%d]: decode error\n", kv.me)
 	} else {
-		kv.kvData = kvData
+		kv.kvDataBase = kvDataBase
 		kv.clientReply = clientReply
+		kv.storeInterface = &kvDataBase
 	}
 }

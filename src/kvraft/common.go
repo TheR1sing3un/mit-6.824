@@ -1,5 +1,7 @@
 package kvraft
 
+import "log"
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
@@ -36,3 +38,20 @@ type GetReply struct {
 	Err   Err
 	Value string
 }
+
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
+
+type CommandType string
+
+const (
+	PutMethod    = "Put"
+	AppendMethod = "Append"
+	GetMethod    = "Get"
+)

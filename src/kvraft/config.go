@@ -265,7 +265,7 @@ func (cfg *config) ShutdownServer(i int) {
 	// it's important to do this before creating
 	// the new Persister in saved[i], to avoid
 	// the possibility of the server returning a
-	// positive reply to an Append but persisting
+	// positive Reply to an Append but persisting
 	// the result in the superseded Persister.
 	cfg.net.DeleteServer(i)
 
