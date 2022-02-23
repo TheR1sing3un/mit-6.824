@@ -21,6 +21,7 @@ type Op struct {
 	Value       string      //值(Get请求时此处为空)
 	ClientId    int64       //client的唯一id
 	CommandId   int         //命令的唯一id
+	Shard       int         //分片迁移命令的分片id
 }
 
 type ShardKV struct {
@@ -53,6 +54,7 @@ type ApplyNotifyMsg struct {
 	//该被应用的command的term,便于RPC handler判断是否为过期请求(之前为leader并且start了,但是后来没有成功commit就变成了follower,导致一开始Start()得到的index处的命令不一定是之前的那个,所以需要拒绝掉;
 	//或者是处于少部分分区的leader接收到命令,后来恢复分区之后,index处的log可能换成了新的leader的commit的log了
 	Term int
+	Data map[string]string //目标分片的数据
 }
 
 type CommandContext struct {
@@ -209,7 +211,54 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	go kv.CloseChan(index)
 }
 
-//
+// ShardMove 分片转移
+func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
+	kv.mu.Lock()
+	DPrintf("shardkv[%d][%d]: 接收到shard[%d]转移请求\n", kv.gid, kv.me, args.Shard)
+	defer func() {
+		DPrintf("shardkv[%d][%d]: 返回ShardMove RPC请求,args=[%v];Reply=[%v]\n", kv.gid, kv.me, args, reply)
+	}()
+	//若请求的配置编号小于当前自己的配置编号,则告诉请求端该配置已过期,需要获取新的
+	if args.ConfigNum < kv.config.Num {
+		reply.Err = ErrExpiredConfig
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+	//生成命令
+	op := Op{}
+	op.CommandType = ShardMoveMethod
+	op.Shard = args.Shard
+	index, term, isLeader := kv.rf.Start(op)
+	//3.若不为leader则直接返回Err
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	replyCh := make(chan ApplyNotifyMsg, 1)
+	kv.mu.Lock()
+	kv.replyChMap[index] = replyCh
+	DPrintf("kvserver[%d]: 创建reply通道:index=[%d]\n", kv.me, index)
+	kv.mu.Unlock()
+	//4.等待应用后返回消息
+	select {
+	case replyMsg := <-replyCh:
+		//当被通知时,返回结果
+		if term == replyMsg.Term {
+			reply.Err = replyMsg.Err
+			reply.Data = replyMsg.Data
+		} else {
+			reply.Err = ErrWrongLeader
+		}
+	case <-time.After(500 * time.Millisecond):
+		//超时,返回结果,但是不更新Command -> Reply
+		reply.Err = ErrTimeout
+		DPrintf("kvserver[%d]: 处理请求超时: %v\n", kv.me, op)
+	}
+	go kv.CloseChan(index)
+}
+
+// Kill
 // the tester calls Kill() when a ShardKV instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
@@ -234,12 +283,14 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 	d := labgob.NewDecoder(r)
 	var kvDataBase KvDataBase
 	var clientReply map[int64]CommandContext
-	if d.Decode(&kvDataBase) != nil || d.Decode(&clientReply) != nil {
+	var config shardctrler.Config
+	if d.Decode(&kvDataBase) != nil || d.Decode(&clientReply) != nil || d.Decode(&config) != nil {
 		DPrintf("kvserver[%d]: decode error\n", kv.me)
 	} else {
 		kv.kvDataBase = kvDataBase
-		kv.clientReply = clientReply
 		kv.storeInterface = &kvDataBase
+		kv.clientReply = clientReply
+		kv.config = config
 	}
 }
 
@@ -248,13 +299,88 @@ func (kv *ShardKV) UpdateConfig() {
 	for !kv.killed() {
 		select {
 		case <-kv.timerUpdateConfig.C:
-			//更新配置
+			//若不为leader则不进行配置拉取
+			//if _, isLeader := kv.rf.GetState(); !isLeader {
+			//	kv.timerUpdateConfig.Reset(time.Duration(kv.timeoutUpdateConfig) * time.Millisecond)
+			//	DPrintf("shardkv[%d][%d]: 不为leader,不进行配置拉取\n", kv.gid, kv.me)
+			//	continue
+			//}
+			newConfig := kv.mck.Query(-1)
 			kv.mu.Lock()
-			kv.config = kv.mck.Query(-1)
+			//检查是否为新配置
+			if newConfig.Num > kv.config.Num {
+				if len(kv.config.Groups) == 0 {
+					//为第一个有意义的config,则不需要迁移shard
+					oldConfig := kv.config
+					kv.config = newConfig
+					DPrintf("shardkv[%d][%d]: 成功更新到该config: %v;old config: %v\n", kv.gid, kv.me, newConfig, oldConfig)
+				} else {
+					//若为新配置,则找出需要获取的分片id
+					shardsAndGIds := kv.findNeedGetShards(newConfig, kv.config)
+					flag := true
+					//获取需要分片的数据
+					for shard, gId := range shardsAndGIds {
+						if !kv.requestShard(shard, newConfig.Num, gId) {
+							//当前配置已经过期了,则不更新到那个配置了,直接重新开始获取
+							kv.timerUpdateConfig.Reset(10 * time.Millisecond)
+							flag = false
+							break
+						}
+					}
+					if flag {
+						oldConfig := kv.config
+						kv.config = newConfig
+						DPrintf("shardkv[%d][%d]: 成功更新到该config: %v;old config: %v\n", kv.gid, kv.me, newConfig, oldConfig)
+					} else {
+						DPrintf("shardkv[%d][%d]: 该config: %v 已经过期\n", kv.gid, kv.me, newConfig)
+					}
+				}
+			}
 			kv.timerUpdateConfig.Reset(time.Duration(kv.timeoutUpdateConfig) * time.Millisecond)
 			kv.mu.Unlock()
 		}
 	}
+}
+
+func (kv *ShardKV) requestShard(shard int, configNum int, gId int) bool {
+	args := ShardMoveArgs{shard, configNum}
+	for {
+		if servers, ok := kv.config.Groups[gId]; ok {
+			for si := 0; si < len(servers); si++ {
+				srv := kv.make_end(servers[si])
+				var reply ShardMoveReply
+				DPrintf("shardkv[%d][%d]: 请求shardMove,shard=[%d],server=[%v]\n", kv.gid, kv.me, shard, si)
+				kv.mu.Unlock()
+				ok := srv.Call("ShardKV.ShardMove", &args, &reply)
+				kv.mu.Lock()
+				if ok && reply.Err == OK {
+					//若成功,则将获取到数据加入到数据库中
+					kv.storeInterface.Merge(reply.Data)
+					return true
+				}
+				if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
+					//若发送失败,或者leader错误,或者超时,则到下一个server处重发请求
+					continue
+				}
+				if reply.Err == ErrExpiredConfig {
+					//若为过期配置,则返回获取失败
+					return false
+				}
+			}
+		}
+	}
+}
+
+//找到需要获取的分片id
+func (kv *ShardKV) findNeedGetShards(newConfig shardctrler.Config, oldConfig shardctrler.Config) (shardsAndGIds map[int]int) {
+	shardsAndGIds = make(map[int]int)
+	for shard, gId := range newConfig.Shards {
+		if gId == kv.gid && gId != oldConfig.Shards[shard] {
+			//当新的配置的gId为该副本组且旧的配置则不为的时候则找到了需要获取的分片id和之前它的负责副本组id
+			shardsAndGIds[shard] = oldConfig.Shards[shard]
+		}
+	}
+	return shardsAndGIds
 }
 
 func (kv *ShardKV) ReceiveApplyMsg() {
@@ -276,12 +402,37 @@ func (kv *ShardKV) ReceiveApplyMsg() {
 	}
 }
 
+func (kv *ShardKV) getDataByShard(shard int) map[string]string {
+	data := make(map[string]string)
+	for key, value := range kv.kvDataBase.KvData {
+		if key2shard(key) == shard {
+			data[key] = value
+		}
+	}
+	return data
+}
+
 func (kv *ShardKV) ApplyCommand(applyMsg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	var commonReply ApplyNotifyMsg
 	op := applyMsg.Command.(Op)
 	index := applyMsg.CommandIndex
+	//先判断是不是分片迁移命令
+	if op.CommandType == ShardMoveMethod {
+		if replyCh, ok := kv.replyChMap[index]; ok {
+			//获取到该分片的所有数据
+			data := kv.getDataByShard(op.Shard)
+			commonReply.Err = OK
+			commonReply.Data = data
+			commonReply.Term = applyMsg.CommandTerm
+			//通知handler
+			DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知index = [%d]的channel\n", kv.me, applyMsg, index)
+			replyCh <- commonReply
+			DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知完成index = [%d]的channel\n", kv.me, applyMsg, index)
+		}
+		return
+	}
 	//当命令已经被应用过了
 	if commandContext, ok := kv.clientReply[op.ClientId]; ok && commandContext.Command >= op.CommandId {
 		DPrintf("kvserver[%d]: 该命令已被应用过,applyMsg: %v, commandContext: %v\n", kv.me, applyMsg, commandContext)
@@ -293,19 +444,19 @@ func (kv *ShardKV) ApplyCommand(applyMsg raft.ApplyMsg) {
 		//Get请求时
 		if value, ok := kv.storeInterface.Get(op.Key); ok {
 			//有该数据时
-			commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
+			commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm, nil}
 		} else {
 			//当没有数据时
-			commonReply = ApplyNotifyMsg{ErrNoKey, value, applyMsg.CommandTerm}
+			commonReply = ApplyNotifyMsg{ErrNoKey, value, applyMsg.CommandTerm, nil}
 		}
 	} else if op.CommandType == PutMethod {
 		//Put请求时
 		value := kv.storeInterface.Put(op.Key, op.Value)
-		commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
+		commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm, nil}
 	} else if op.CommandType == AppendMethod {
 		//Append请求时
 		newValue := kv.storeInterface.Append(op.Key, op.Value)
-		commonReply = ApplyNotifyMsg{OK, newValue, applyMsg.CommandTerm}
+		commonReply = ApplyNotifyMsg{OK, newValue, applyMsg.CommandTerm, nil}
 	}
 	//通知handler去响应请求
 	if replyCh, ok := kv.replyChMap[index]; ok {
@@ -359,6 +510,10 @@ func (kv *ShardKV) createSnapshot() []byte {
 		log.Fatalf("kvserver[%d]: encode clientReply error: %v\n", kv.me, err)
 	}
 	//编码config
+	err = e.Encode(kv.config)
+	if err != nil {
+		log.Fatalf("kvserver[%d]: encode config error: %v\n", kv.me, err)
+	}
 	snapshotData := w.Bytes()
 	return snapshotData
 }
@@ -447,4 +602,5 @@ type store interface {
 	Get(key string) (value string, ok bool)
 	Put(key string, value string) (newValue string)
 	Append(key string, arg string) (newValue string)
+	Merge(map[string]string)
 }

@@ -23,17 +23,19 @@ func DPrintf(format string, a ...interface{}) {
 type CommandType string
 
 const (
-	PutMethod    = "Put"
-	AppendMethod = "Append"
-	GetMethod    = "Get"
+	PutMethod       = "Put"
+	AppendMethod    = "Append"
+	GetMethod       = "Get"
+	ShardMoveMethod = "ShardMoveMethod"
 )
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrTimeout     = "ErrTimeout"
+	OK               = "OK"
+	ErrNoKey         = "ErrNoKey"
+	ErrWrongGroup    = "ErrWrongGroup"
+	ErrWrongLeader   = "ErrWrongLeader"
+	ErrTimeout       = "ErrTimeout"
+	ErrExpiredConfig = "ErrExpiredConfig"
 )
 
 type Err string
@@ -65,4 +67,14 @@ type GetArgs struct {
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+type ShardMoveArgs struct {
+	Shard     int //分片id
+	ConfigNum int //配置编号
+}
+
+type ShardMoveReply struct {
+	Err  Err
+	Data map[string]string //该Shard的数据
 }

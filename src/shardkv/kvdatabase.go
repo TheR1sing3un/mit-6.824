@@ -28,3 +28,9 @@ func (kv *KvDataBase) Append(key string, arg string) (newValue string) {
 	kv.KvData[key] = arg
 	return arg
 }
+
+func (kv *KvDataBase) Merge(data map[string]string) {
+	for key, value := range data {
+		kv.KvData[key] = value
+	}
+}
