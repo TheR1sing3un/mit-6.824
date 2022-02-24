@@ -47,7 +47,8 @@ type ShardKV struct {
 	dead                int32                       //是否已关闭
 	timerUpdateConfig   *time.Timer                 //更新配置的定时器
 	timeoutUpdateConfig int                         //更新配置的轮询周期(/ms)
-	configState         ConfigState                 //配置状态(updating/updated)
+	configState         State                       //配置状态(updating/updated)
+	shardsState         [shardctrler.NShards]State
 }
 
 // ApplyNotifyMsg 可表示GetReply和PutAppendReply
@@ -231,7 +232,7 @@ func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
 		return
 	}
 	kv.mu.Lock()
-	DPrintf("shardkv[%d][%d]: 接收到shard[%d]转移请求\n", kv.gid, kv.me, args.Shard)
+	DPrintf("shardkv[%d][%d]: 接收到shard=[%d],configNum=[%d]转移请求\n", kv.gid, kv.me, args.Shard, args.ConfigNum)
 	defer func() {
 		DPrintf("shardkv[%d][%d]: 返回ShardMove RPC请求,args=[%v];Reply=[%v]\n", kv.gid, kv.me, args, reply)
 	}()
@@ -240,6 +241,12 @@ func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
 		if !kv.timerUpdateConfig.Stop() {
 			kv.timerUpdateConfig.Reset(0)
 		}
+	}
+	if kv.shardsState[args.Shard] == Updating {
+		reply.Err = ErrWrongGroup
+		DPrintf("shardkv[%d][%d]: 请求的shard=[%d]正在更新,当前configNum=[%d]\n", kv.gid, kv.me, args.Shard, args.ConfigNum)
+		kv.mu.Unlock()
+		return
 	}
 	kv.mu.Unlock()
 	//生成命令
@@ -328,13 +335,17 @@ func (kv *ShardKV) UpdateConfig() {
 			//检查是否为新配置
 			if newConfig.Num > kv.config.Num {
 				//更新配置状态
-				kv.configState = ConfigUpdating
+				kv.configState = Updating
 				oldConfig := kv.config
 				data := make(map[string]string)
 				if len(oldConfig.Groups) != 0 {
 					//找出那些是需要迁移的分片以及它们上一个配置中所在的复制组的id
 					shardsAndGIds := kv.findNeedGetShards(newConfig, oldConfig)
 					DPrintf("shardkv[%d][%d]: 更新配置需要请求的shard->gid的对应为: %v\n", kv.gid, kv.me, shardsAndGIds)
+					//更新状态shards状态
+					for shard := range shardsAndGIds {
+						kv.shardsState[shard] = Updating
+					}
 					//获取需要分片的数据
 					for shard, gId := range shardsAndGIds {
 						data = mergeTwoMap(data, kv.requestShard(shard, newConfig.Num, gId))
@@ -357,9 +368,9 @@ func (kv *ShardKV) UpdateConfig() {
 					case replyMsg := <-replyCh:
 						//当被通知时,返回结果
 						kv.mu.Lock()
-						if term == replyMsg.Term && newConfig.Num == kv.config.Num+1 {
-							kv.config = newConfig
-							kv.storeInterface.Merge(data)
+						if term == replyMsg.Term {
+							//kv.config = newConfig
+							//kv.storeInterface.Merge(data)
 							DPrintf("shardkv[%d][%d]: 成功更新到该config: %v;old config: %v\n", kv.gid, kv.me, newConfig, oldConfig)
 						} else {
 							DPrintf("shardkv[%d][%d]: term发生变化,未能更新到该config: %v;old config: %v\n", kv.gid, kv.me, newConfig, oldConfig)
@@ -372,9 +383,12 @@ func (kv *ShardKV) UpdateConfig() {
 					go kv.CloseChan(index)
 				}
 				kv.mu.Lock()
+				for shard := range kv.shardsState {
+					kv.shardsState[shard] = Updated
+				}
 			}
 			//更新配置状态
-			kv.configState = ConfigUpdated
+			kv.configState = Updated
 			kv.timerUpdateConfig.Reset(time.Duration(kv.timeoutUpdateConfig) * time.Millisecond)
 			kv.mu.Unlock()
 		}
@@ -408,6 +422,11 @@ func (kv *ShardKV) requestShard(shard int, configNum int, gId int) (data map[str
 				}
 				if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
 					//若发送失败,或者leader错误,或者超时,则到下一个server处重发请求
+					continue
+				}
+				if reply.Err == ErrUpdatingShard {
+					time.Sleep(10 * time.Millisecond)
+					si--
 					continue
 				}
 			}
@@ -482,17 +501,19 @@ func (kv *ShardKV) ApplyCommand(applyMsg raft.ApplyMsg) {
 	if op.CommandType == ShardReplicaMethod {
 		//通知应用该配置
 		//通知handler
-		if replyCh, ok := kv.replyChMap[index]; ok {
-			commonReply.Term = applyMsg.CommandTerm
-			DPrintf("shardkv[%d][%d]: applyMsg: %v处理完成,通知index = [%d]的channel\n", kv.gid, kv.me, applyMsg, index)
-			replyCh <- commonReply
-			DPrintf("shardkv[%d][%d]: applyMsg: %v处理完成,通知完成index = [%d]的channel\n", kv.gid, kv.me, applyMsg, index)
-		} else {
-			if kv.config.Num < op.Config.Num {
-				kv.config = op.Config
-				kv.storeInterface.Merge(op.Data)
-				DPrintf("shardkv[%d][%d]: 成功更新到该config: %v\n", kv.gid, kv.me, kv.config)
+		if kv.config.Num < op.Config.Num {
+			kv.config = op.Config
+			kv.storeInterface.Merge(op.Data)
+			DPrintf("shardkv[%d][%d]: 成功更新到该config: %v\n", kv.gid, kv.me, kv.config)
+			if replyCh, ok := kv.replyChMap[index]; ok {
+				commonReply.Term = applyMsg.CommandTerm
+				DPrintf("shardkv[%d][%d]: applyMsg: %v处理完成,通知index = [%d]的channel\n", kv.gid, kv.me, applyMsg, index)
+				replyCh <- commonReply
+				DPrintf("shardkv[%d][%d]: applyMsg: %v处理完成,通知完成index = [%d]的channel\n", kv.gid, kv.me, applyMsg, index)
 			}
+		}
+		for i := range kv.shardsState {
+			kv.shardsState[i] = Updated
 		}
 		kv.lastApplied = applyMsg.CommandIndex
 		return
@@ -644,7 +665,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.kvDataBase = KvDataBase{make(map[string]string)}
 	kv.storeInterface = &kv.kvDataBase
 	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
-	kv.configState = ConfigUpdated
+	kv.configState = Updated
+	for i := range kv.shardsState {
+		kv.shardsState[i] = Updated
+	}
 	// Use something like this to talk to the shardctrler:
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 
