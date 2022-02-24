@@ -23,19 +23,19 @@ func DPrintf(format string, a ...interface{}) {
 type CommandType string
 
 const (
-	PutMethod       = "Put"
-	AppendMethod    = "Append"
-	GetMethod       = "Get"
-	ShardMoveMethod = "ShardMoveMethod"
+	PutMethod          = "Put"
+	AppendMethod       = "Append"
+	GetMethod          = "Get"
+	ShardMoveMethod    = "ShardMove"
+	ShardReplicaMethod = "ShardReplica"
 )
 
 const (
-	OK               = "OK"
-	ErrNoKey         = "ErrNoKey"
-	ErrWrongGroup    = "ErrWrongGroup"
-	ErrWrongLeader   = "ErrWrongLeader"
-	ErrTimeout       = "ErrTimeout"
-	ErrExpiredConfig = "ErrExpiredConfig"
+	OK             = "OK"
+	ErrNoKey       = "ErrNoKey"
+	ErrWrongGroup  = "ErrWrongGroup"
+	ErrWrongLeader = "ErrWrongLeader"
+	ErrTimeout     = "ErrTimeout"
 )
 
 type Err string

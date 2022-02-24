@@ -135,7 +135,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					ck.requestId++
 					return
 				}
-				if ok && reply.Err == ErrWrongGroup {
+				if ok && (reply.Err == ErrWrongGroup) {
 					break
 				}
 				if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
