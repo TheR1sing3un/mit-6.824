@@ -47,6 +47,7 @@ type ShardKV struct {
 	dead                int32                       //是否已关闭
 	timerUpdateConfig   *time.Timer                 //更新配置的定时器
 	timeoutUpdateConfig int                         //更新配置的轮询周期(/ms)
+	configState         ConfigState                 //配置状态(updating/updated)
 }
 
 // ApplyNotifyMsg 可表示GetReply和PutAppendReply
@@ -78,11 +79,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		DPrintf("shardkv[%d][%d]: 返回Get RPC请求,args=[%v];Reply=[%v]\n", kv.gid, kv.me, args, reply)
 	}()
 	DPrintf("shardkv[%d][%d]: 接收Get RPC请求,args=[%v]\n", kv.gid, kv.me, args)
-	//if args.ConfigNum != kv.config.Num {
-	//	reply.Err = ErrValidConfig
-	//	kv.mu.Unlock()
-	//	return
-	//}
 	shard := key2shard(args.Key)
 	if !kv.responsibleForShard(shard) {
 		//若该副本组不负责该key
@@ -331,11 +327,14 @@ func (kv *ShardKV) UpdateConfig() {
 			newConfig := kv.mck.Query(kv.config.Num + 1)
 			//检查是否为新配置
 			if newConfig.Num > kv.config.Num {
+				//更新配置状态
+				kv.configState = ConfigUpdating
 				oldConfig := kv.config
 				data := make(map[string]string)
 				if len(oldConfig.Groups) != 0 {
 					//找出那些是需要迁移的分片以及它们上一个配置中所在的复制组的id
-					shardsAndGIds := kv.findNeedGetShards(newConfig, kv.config)
+					shardsAndGIds := kv.findNeedGetShards(newConfig, oldConfig)
+					DPrintf("shardkv[%d][%d]: 更新配置需要请求的shard->gid的对应为: %v\n", kv.gid, kv.me, shardsAndGIds)
 					//获取需要分片的数据
 					for shard, gId := range shardsAndGIds {
 						data = mergeTwoMap(data, kv.requestShard(shard, newConfig.Num, gId))
@@ -366,14 +365,16 @@ func (kv *ShardKV) UpdateConfig() {
 							DPrintf("shardkv[%d][%d]: term发生变化,未能更新到该config: %v;old config: %v\n", kv.gid, kv.me, newConfig, oldConfig)
 						}
 						kv.mu.Unlock()
+
 					case <-time.After(500 * time.Millisecond):
-						//超时,返回结果,但是不更新Command -> Reply
 						DPrintf("shardkv[%d][%d]: 更新config处理请求超时: %v\n", kv.gid, kv.me, op)
 					}
 					go kv.CloseChan(index)
 				}
 				kv.mu.Lock()
 			}
+			//更新配置状态
+			kv.configState = ConfigUpdated
 			kv.timerUpdateConfig.Reset(time.Duration(kv.timeoutUpdateConfig) * time.Millisecond)
 			kv.mu.Unlock()
 		}
@@ -643,7 +644,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.kvDataBase = KvDataBase{make(map[string]string)}
 	kv.storeInterface = &kv.kvDataBase
 	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
-
+	kv.configState = ConfigUpdated
 	// Use something like this to talk to the shardctrler:
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 

@@ -20,6 +20,13 @@ func DPrintf(format string, a ...interface{}) {
 	return
 }
 
+type ConfigState string
+
+const (
+	ConfigUpdating = "ConfigUpdating"
+	ConfigUpdated  = "ConfigUpdated"
+)
+
 type CommandType string
 
 const (
@@ -31,11 +38,12 @@ const (
 )
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrTimeout     = "ErrTimeout"
+	OK                = "OK"
+	ErrNoKey          = "ErrNoKey"
+	ErrWrongGroup     = "ErrWrongGroup"
+	ErrWrongLeader    = "ErrWrongLeader"
+	ErrTimeout        = "ErrTimeout"
+	ErrNoUpdateServer = "ErrNoUpdateServer"
 )
 
 type Err string
