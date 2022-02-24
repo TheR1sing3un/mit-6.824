@@ -242,8 +242,8 @@ func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
 			kv.timerUpdateConfig.Reset(0)
 		}
 	}
-	if kv.shardsState[args.Shard] == Updating {
-		reply.Err = ErrWrongGroup
+	if (kv.shardsState[args.Shard] == Updated && args.ConfigNum > kv.config.Num+1) || (kv.shardsState[args.Shard] == Updating && args.ConfigNum != kv.config.Num) {
+		reply.Err = ErrUpdatingShard
 		DPrintf("shardkv[%d][%d]: 请求的shard=[%d]正在更新,当前configNum=[%d]\n", kv.gid, kv.me, args.Shard, args.ConfigNum)
 		kv.mu.Unlock()
 		return
@@ -308,13 +308,15 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 	var kvDataBase KvDataBase
 	var clientReply map[int64]CommandContext
 	var config shardctrler.Config
-	if d.Decode(&kvDataBase) != nil || d.Decode(&clientReply) != nil || d.Decode(&config) != nil {
+	var shardsState [10]State
+	if d.Decode(&kvDataBase) != nil || d.Decode(&clientReply) != nil || d.Decode(&config) != nil || d.Decode(&shardsState) != nil {
 		DPrintf("shardkv[%d][%d]: decode error\n", kv.gid, kv.me)
 	} else {
 		kv.kvDataBase = kvDataBase
 		kv.storeInterface = &kvDataBase
 		kv.clientReply = clientReply
 		kv.config = config
+		kv.shardsState = shardsState
 	}
 }
 
@@ -598,6 +600,11 @@ func (kv *ShardKV) createSnapshot() []byte {
 	err = e.Encode(kv.config)
 	if err != nil {
 		log.Fatalf("shardkv[%d][%d]: encode config error: %v\n", kv.gid, kv.me, err)
+	}
+	//编码shardsState
+	err = e.Encode(kv.shardsState)
+	if err != nil {
+		log.Fatalf("shardkv[%d][%d]: encode shardsState error: %v\n", kv.gid, kv.me, err)
 	}
 	snapshotData := w.Bytes()
 	return snapshotData
