@@ -24,6 +24,7 @@ type Op struct {
 	Shard       int               //分片迁移命令的分片id
 	Data        map[string]string //移动过来的分片的数据
 	Config      shardctrler.Config
+	ClientReply map[int64]CommandContext
 }
 
 type ShardKV struct {
@@ -57,8 +58,9 @@ type ApplyNotifyMsg struct {
 	Value string //当Put/Append请求时此处为空
 	//该被应用的command的term,便于RPC handler判断是否为过期请求(之前为leader并且start了,但是后来没有成功commit就变成了follower,导致一开始Start()得到的index处的命令不一定是之前的那个,所以需要拒绝掉;
 	//或者是处于少部分分区的leader接收到命令,后来恢复分区之后,index处的log可能换成了新的leader的commit的log了
-	Term int
-	Data map[string]string //目标分片的数据
+	Term        int
+	Data        map[string]string        //目标分片的数据
+	ClientReply map[int64]CommandContext //去重
 }
 
 type CommandContext struct {
@@ -66,7 +68,7 @@ type CommandContext struct {
 	Reply   ApplyNotifyMsg //该command的响应
 }
 
-//该集群对该分片
+//该集群负责该分片
 func (kv *ShardKV) responsibleForShard(shard int) bool {
 	gId := kv.config.Shards[shard]
 	return gId == kv.gid
@@ -80,14 +82,6 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		DPrintf("shardkv[%d][%d]: 返回Get RPC请求,args=[%v];Reply=[%v]\n", kv.gid, kv.me, args, reply)
 	}()
 	DPrintf("shardkv[%d][%d]: 接收Get RPC请求,args=[%v]\n", kv.gid, kv.me, args)
-	shard := key2shard(args.Key)
-	if !kv.responsibleForShard(shard) {
-		//若该副本组不负责该key
-		reply.Err = ErrWrongGroup
-		DPrintf("shardkv[%d][%d]: 该副本组不负责该key=[%v],shard=[%d],shard belong to: [%d]\n", kv.gid, kv.me, args.Key, shard, kv.config.Shards[shard])
-		kv.mu.Unlock()
-		return
-	}
 	//1.先判断该命令是否已经被执行过了
 	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
 		if commandContext.Command >= args.RequestId {
@@ -97,6 +91,20 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 			kv.mu.Unlock()
 			return
 		}
+	}
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	shard := key2shard(args.Key)
+	if !kv.responsibleForShard(shard) || kv.shardsState[shard] == Updating {
+		//若该副本组不负责该key
+		reply.Err = ErrWrongGroup
+		DPrintf("shardkv[%d][%d]: 该副本组不负责该key=[%v],shard=[%d],shard belong to: [%d]\n", kv.gid, kv.me, args.Key, shard, kv.config.Shards[shard])
+		kv.mu.Unlock()
+		return
 	}
 	kv.mu.Unlock()
 	//2.若命令未被执行,那么开始生成Op并传递给raft
@@ -122,11 +130,9 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	case replyMsg := <-replyCh:
 		//当被通知时,返回结果
 		DPrintf("shardkv[%d][%d]: 获取到通知结果,index=[%d],replyMsg: %v\n", kv.gid, kv.me, index, replyMsg)
-		if term == replyMsg.Term && key2shard(args.Key) == kv.gid {
+		if term == replyMsg.Term {
 			reply.Err = replyMsg.Err
 			reply.Value = replyMsg.Value
-		} else if key2shard(args.Key) != kv.gid {
-			reply.Err = ErrWrongGroup
 		} else {
 			reply.Err = ErrWrongLeader
 		}
@@ -161,19 +167,6 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("shardkv[%d][%d]: 返回PutAppend RPC请求,args=[%v];Reply=[%v]\n", kv.gid, kv.me, args, reply)
 	}()
 	DPrintf("shardkv[%d][%d]: 接收PutAppend RPC请求,args=[%v]\n", kv.gid, kv.me, args)
-	//if args.ConfigNum != kv.config.Num {
-	//	reply.Err = ErrValidConfig
-	//	kv.mu.Unlock()
-	//	return
-	//}
-	shard := key2shard(args.Key)
-	if !kv.responsibleForShard(shard) {
-		//若该副本组不负责该key
-		reply.Err = ErrWrongGroup
-		DPrintf("shardkv[%d][%d]: 该副本组不负责该key=[%v],shard=[%d],shard belong to: [%d]\n", kv.gid, kv.me, args.Key, shard, kv.config.Shards[shard])
-		kv.mu.Unlock()
-		return
-	}
 	//1.先判断该命令是否已经被执行过了
 	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
 		//若该命令已被执行了,直接返回刚刚返回的结果
@@ -184,6 +177,20 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			kv.mu.Unlock()
 			return
 		}
+	}
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
+		return
+	}
+	shard := key2shard(args.Key)
+	if !kv.responsibleForShard(shard) || kv.shardsState[shard] == Updating {
+		//若该副本组不负责该key
+		reply.Err = ErrWrongGroup
+		DPrintf("shardkv[%d][%d]: 该副本组不负责该key=[%v],shard=[%d],shard belong to: [%d]\n", kv.gid, kv.me, args.Key, shard, kv.config.Shards[shard])
+		kv.mu.Unlock()
+		return
 	}
 	kv.mu.Unlock()
 	//2.若命令未被执行,那么开始生成Op并传递给raft
@@ -209,10 +216,8 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	select {
 	case replyMsg := <-replyCh:
 		//当被通知时,返回结果
-		if term == replyMsg.Term && key2shard(args.Key) == kv.gid {
+		if term == replyMsg.Term {
 			reply.Err = replyMsg.Err
-		} else if key2shard(args.Key) != kv.gid {
-			reply.Err = ErrWrongGroup
 		} else {
 			reply.Err = ErrWrongLeader
 		}
@@ -238,13 +243,15 @@ func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
 	}()
 	//若请求的配置编号大于当前自己的配置编号,自己立马去更新配置
 	if args.ConfigNum > kv.config.Num {
+		DPrintf("shardkv[%d][%d]: shard=[%d],configNum=[%d]转移请求大于自身当前的config=[%d]\n", kv.gid, kv.me, args.Shard, args.ConfigNum, kv.config.Num)
 		if !kv.timerUpdateConfig.Stop() {
 			kv.timerUpdateConfig.Reset(0)
 		}
+		kv.shardsState[args.Shard] = Updating
 	}
 	if (kv.shardsState[args.Shard] == Updated && args.ConfigNum > kv.config.Num+1) || (kv.shardsState[args.Shard] == Updating && args.ConfigNum != kv.config.Num) {
 		reply.Err = ErrUpdatingShard
-		DPrintf("shardkv[%d][%d]: 请求的shard=[%d]正在更新,当前configNum=[%d]\n", kv.gid, kv.me, args.Shard, args.ConfigNum)
+		DPrintf("shardkv[%d][%d]: 请求的shard=[%d]正在更新,当前configNum=[%d]\n", kv.gid, kv.me, args.Shard, kv.config.Num)
 		kv.mu.Unlock()
 		return
 	}
@@ -259,6 +266,7 @@ func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	//kv.shardsState[args.Shard] = Updating
 	replyCh := make(chan ApplyNotifyMsg, 1)
 	kv.mu.Lock()
 	kv.replyChMap[index] = replyCh
@@ -271,6 +279,8 @@ func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
 		if term == replyMsg.Term {
 			reply.Err = replyMsg.Err
 			reply.Data = replyMsg.Data
+			reply.ClientReply = replyMsg.ClientReply
+			//kv.shardsState[args.Shard] = Updated
 		} else {
 			reply.Err = ErrWrongLeader
 		}
@@ -308,7 +318,7 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 	var kvDataBase KvDataBase
 	var clientReply map[int64]CommandContext
 	var config shardctrler.Config
-	var shardsState [10]State
+	var shardsState [shardctrler.NShards]State
 	if d.Decode(&kvDataBase) != nil || d.Decode(&clientReply) != nil || d.Decode(&config) != nil || d.Decode(&shardsState) != nil {
 		DPrintf("shardkv[%d][%d]: decode error\n", kv.gid, kv.me)
 	} else {
@@ -332,6 +342,11 @@ func (kv *ShardKV) UpdateConfig() {
 				continue
 			}
 			kv.mu.Lock()
+			if kv.configState == Updating {
+				kv.timerUpdateConfig.Reset(time.Duration(kv.timeoutUpdateConfig) * time.Millisecond)
+				kv.mu.Unlock()
+				continue
+			}
 			//查询下一个配置
 			newConfig := kv.mck.Query(kv.config.Num + 1)
 			//检查是否为新配置
@@ -340,6 +355,7 @@ func (kv *ShardKV) UpdateConfig() {
 				kv.configState = Updating
 				oldConfig := kv.config
 				data := make(map[string]string)
+				clientReply := make(map[int64]CommandContext)
 				if len(oldConfig.Groups) != 0 {
 					//找出那些是需要迁移的分片以及它们上一个配置中所在的复制组的id
 					shardsAndGIds := kv.findNeedGetShards(newConfig, oldConfig)
@@ -350,7 +366,9 @@ func (kv *ShardKV) UpdateConfig() {
 					}
 					//获取需要分片的数据
 					for shard, gId := range shardsAndGIds {
-						data = mergeTwoMap(data, kv.requestShard(shard, newConfig.Num, gId))
+						d, cr := kv.requestShard(shard, newConfig.Num, gId)
+						data = mergeTwoMap(data, d)
+						clientReply = mergeClientReply(clientReply, cr)
 					}
 				}
 				kv.mu.Unlock()
@@ -358,6 +376,7 @@ func (kv *ShardKV) UpdateConfig() {
 				op.CommandType = ShardReplicaMethod
 				op.Data = data
 				op.Config = newConfig
+				op.ClientReply = clientReply
 				index, term, isLeader := kv.rf.Start(op)
 				if isLeader {
 					replyCh := make(chan ApplyNotifyMsg, 1)
@@ -385,16 +404,31 @@ func (kv *ShardKV) UpdateConfig() {
 					go kv.CloseChan(index)
 				}
 				kv.mu.Lock()
-				for shard := range kv.shardsState {
-					kv.shardsState[shard] = Updated
-				}
 			}
-			//更新配置状态
 			kv.configState = Updated
+			//更新配置状态
+			for shard := range kv.shardsState {
+				kv.shardsState[shard] = Updated
+			}
 			kv.timerUpdateConfig.Reset(time.Duration(kv.timeoutUpdateConfig) * time.Millisecond)
 			kv.mu.Unlock()
 		}
 	}
+}
+
+func mergeClientReply(reply map[int64]CommandContext, cr map[int64]CommandContext) map[int64]CommandContext {
+	for clientId, contextCr := range cr {
+		if context, ok := reply[clientId]; !ok {
+			reply[clientId] = context
+		} else {
+			if contextCr.Command > context.Command {
+				reply[clientId] = contextCr
+			} else {
+				reply[clientId] = context
+			}
+		}
+	}
+	return reply
 }
 
 func mergeTwoMap(map1 map[string]string, map2 map[string]string) (mapSum map[string]string) {
@@ -408,7 +442,7 @@ func mergeTwoMap(map1 map[string]string, map2 map[string]string) (mapSum map[str
 	return mapSum
 }
 
-func (kv *ShardKV) requestShard(shard int, configNum int, gId int) (data map[string]string) {
+func (kv *ShardKV) requestShard(shard int, configNum int, gId int) (data map[string]string, clientReply map[int64]CommandContext) {
 	args := ShardMoveArgs{shard, configNum}
 	for {
 		if servers, ok := kv.config.Groups[gId]; ok {
@@ -420,7 +454,7 @@ func (kv *ShardKV) requestShard(shard int, configNum int, gId int) (data map[str
 				ok := srv.Call("ShardKV.ShardMove", &args, &reply)
 				kv.mu.Lock()
 				if ok && reply.Err == OK {
-					return reply.Data
+					return reply.Data, reply.ClientReply
 				}
 				if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {
 					//若发送失败,或者leader错误,或者超时,则到下一个server处重发请求
@@ -491,6 +525,10 @@ func (kv *ShardKV) ApplyCommand(applyMsg raft.ApplyMsg) {
 			commonReply.Err = OK
 			commonReply.Data = data
 			commonReply.Term = applyMsg.CommandTerm
+			commonReply.ClientReply = make(map[int64]CommandContext)
+			for clientId, context := range kv.clientReply {
+				commonReply.ClientReply[clientId] = context
+			}
 			//通知handler
 			DPrintf("shardkv[%d][%d]: applyMsg: %v处理完成,通知index = [%d]的channel\n", kv.gid, kv.me, applyMsg, index)
 			replyCh <- commonReply
@@ -506,6 +544,7 @@ func (kv *ShardKV) ApplyCommand(applyMsg raft.ApplyMsg) {
 		if kv.config.Num < op.Config.Num {
 			kv.config = op.Config
 			kv.storeInterface.Merge(op.Data)
+			kv.clientReply = mergeClientReply(kv.clientReply, op.ClientReply)
 			DPrintf("shardkv[%d][%d]: 成功更新到该config: %v\n", kv.gid, kv.me, kv.config)
 			if replyCh, ok := kv.replyChMap[index]; ok {
 				commonReply.Term = applyMsg.CommandTerm
@@ -526,24 +565,35 @@ func (kv *ShardKV) ApplyCommand(applyMsg raft.ApplyMsg) {
 		commonReply = commandContext.Reply
 		return
 	}
+	//当命令目前不属于当前的配置的时候
+	if !kv.responsibleForShard(key2shard(op.Key)) {
+		commonReply.Err = ErrWrongGroup
+		if replyCh, ok := kv.replyChMap[index]; ok {
+			commonReply.Term = applyMsg.CommandTerm
+			DPrintf("shardkv[%d][%d]: applyMsg: %v处理完成,通知index = [%d]的channel\n", kv.gid, kv.me, applyMsg, index)
+			replyCh <- commonReply
+			DPrintf("shardkv[%d][%d]: applyMsg: %v处理完成,通知完成index = [%d]的channel\n", kv.gid, kv.me, applyMsg, index)
+		}
+		return
+	}
 	//当命令未被应用过
 	if op.CommandType == GetMethod {
 		//Get请求时
 		if value, ok := kv.storeInterface.Get(op.Key); ok {
 			//有该数据时
-			commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm, nil}
+			commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm, nil, nil}
 		} else {
 			//当没有数据时
-			commonReply = ApplyNotifyMsg{ErrNoKey, value, applyMsg.CommandTerm, nil}
+			commonReply = ApplyNotifyMsg{ErrNoKey, value, applyMsg.CommandTerm, nil, nil}
 		}
 	} else if op.CommandType == PutMethod {
 		//Put请求时
 		value := kv.storeInterface.Put(op.Key, op.Value)
-		commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm, nil}
+		commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm, nil, nil}
 	} else if op.CommandType == AppendMethod {
 		//Append请求时
 		newValue := kv.storeInterface.Append(op.Key, op.Value)
-		commonReply = ApplyNotifyMsg{OK, newValue, applyMsg.CommandTerm, nil}
+		commonReply = ApplyNotifyMsg{OK, newValue, applyMsg.CommandTerm, nil, nil}
 	}
 	//通知handler去响应请求
 	if replyCh, ok := kv.replyChMap[index]; ok {

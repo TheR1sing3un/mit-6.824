@@ -83,6 +83,7 @@ type ShardMoveArgs struct {
 }
 
 type ShardMoveReply struct {
-	Err  Err
-	Data map[string]string //该Shard的数据
+	Err         Err
+	Data        map[string]string        //该Shard的数据
+	ClientReply map[int64]CommandContext //去重的map
 }
