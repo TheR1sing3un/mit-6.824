@@ -317,17 +317,26 @@ func (kv *ShardKV) PullShards() {
 	//在需要拉取的分片中遍历
 	wg := sync.WaitGroup{}
 	for shard, configNum := range kv.needPullShards {
-		wg.Add(1)
+		DPrintf("shardkv[%d][%d]: 开始从configNum = [%d]中拉取shard = [%d]\n", kv.gid, kv.me, configNum, shard)
 		c := kv.mck.Query(configNum)
+		DPrintf("shardkv[%d][%d]: 查询到configNum = [%d]的config = %v\n", kv.gid, kv.me, configNum, c)
+		wg.Add(1)
 		go func(shard int, config shardctrler.Config) {
 			defer wg.Done()
+			_, isLeader := kv.rf.GetState()
+			if !isLeader {
+				return
+			}
 			gId := config.Shards[shard]
 			args := ShardMoveArgs{shard, config.Num}
 			for _, server := range config.Groups[gId] {
 				srv := kv.make_end(server)
 				reply := ShardMoveReply{}
+				DPrintf("shardkv[%d][%d]: 向server[%v]请求拉取configNum = [%d],shard = [%d]\n", kv.gid, kv.me, server, config.Num, shard)
 				ok := srv.Call("ShardKV.ShardMove", &args, &reply)
+				DPrintf("shardkv[%d][%d]: 向server[%v]请求拉取configNum = [%d],shard = [%d]返回结果: %v\n", kv.gid, kv.me, server, config.Num, shard, reply)
 				if ok && reply.Err == OK {
+					DPrintf("shardkv[%d][%d]: 拉取成功configNum = [%d]中拉取shard = [%d]\n", kv.gid, kv.me, config.Num, shard)
 					kv.rf.Start(ShardReplicaCommand{reply.ConfigNum, reply.Shard, reply.Data, reply.ClientSeq})
 					break
 				}
@@ -336,6 +345,7 @@ func (kv *ShardKV) PullShards() {
 	}
 	kv.mu.Unlock()
 	wg.Wait()
+	DPrintf("shardkv[%d][%d]: 结束一轮shards拉取\n", kv.gid, kv.me)
 }
 func mergeClientReply(seq1 map[int64]RequestResult, seq2 map[int64]RequestResult) map[int64]RequestResult {
 	for clientId, result2 := range seq2 {
@@ -650,7 +660,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.readSnapshot(kv.rf.GetSnapshot())
 	go kv.ReceiveApplyMsg()
 	go kv.Ticker(kv.PullConfig, 50)
-	go kv.Ticker(kv.PullShards, 50)
+	go kv.Ticker(kv.PullShards, 30)
 	return kv
 }
 

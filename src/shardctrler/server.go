@@ -261,12 +261,26 @@ func (sc *ShardCtrler) ApplyMove(op Op) {
 	}
 }
 
+func max(a int, b int) int {
+	if a > b {
+		return a
+	} else {
+		return b
+	}
+}
+
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	DPrintf("ShardCtrler[%d]: 接收到client[%d],requestId=[%d]的Query请求: %v\n", sc.me, args.ClientId, args.RequestId, args)
 	reply.WrongLeader = false
 	sc.mu.Lock()
-	if id, ok := sc.clientRequest[args.ClientId]; ok && args.RequestId <= id {
-		reply.Err = ErrRepeatRequest
+	//若是已知的config就直接返回(因为config不会删除或者修改)
+	if args.Num > 0 && args.Num < len(sc.configs) {
+		reply.Err, reply.Config = OK, sc.configs[args.Num]
+		if request, ok := sc.clientRequest[args.ClientId]; ok {
+			sc.clientRequest[args.ClientId] = max(request, args.RequestId)
+		} else {
+			sc.clientRequest[args.ClientId] = request
+		}
 		sc.mu.Unlock()
 		return
 	}
