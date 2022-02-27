@@ -97,7 +97,7 @@ func (ck *Clerk) Get(key string) string {
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
-					//若请求的server不负责该分片,则break,等待100ms后再获取最新配置并再次开始请求
+					//若请求的server不负责该分片,则break
 					break
 				}
 				if !ok || reply.Err == ErrWrongLeader || reply.Err == ErrTimeout {

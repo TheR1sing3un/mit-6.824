@@ -1,6 +1,9 @@
 package shardkv
 
-import "log"
+import (
+	"6.824/shardctrler"
+	"log"
+)
 
 //
 // Sharded key/value server.
@@ -20,30 +23,21 @@ func DPrintf(format string, a ...interface{}) {
 	return
 }
 
-type State string
-
-const (
-	Updating = "Updating"
-	Updated  = "Updated"
-)
-
 type CommandType string
 
 const (
-	PutMethod          = "Put"
-	AppendMethod       = "Append"
-	GetMethod          = "Get"
-	ShardMoveMethod    = "ShardMove"
-	ShardReplicaMethod = "ShardReplica"
+	PutMethod    = "Put"
+	AppendMethod = "Append"
+	GetMethod    = "Get"
 )
 
 const (
-	OK               = "OK"
-	ErrNoKey         = "ErrNoKey"
-	ErrWrongGroup    = "ErrWrongGroup"
-	ErrWrongLeader   = "ErrWrongLeader"
-	ErrTimeout       = "ErrTimeout"
-	ErrUpdatingShard = "ErrUpdatingShard"
+	OK                 = "OK"
+	ErrNoKey           = "ErrNoKey"
+	ErrWrongGroup      = "ErrWrongGroup"
+	ErrWrongLeader     = "ErrWrongLeader"
+	ErrTimeout         = "ErrTimeout"
+	ErrServerNoUpdated = "ErrServerNoUpdated"
 )
 
 type Err string
@@ -83,7 +77,20 @@ type ShardMoveArgs struct {
 }
 
 type ShardMoveReply struct {
-	Err         Err
-	Data        map[string]string        //该Shard的数据
-	ClientReply map[int64]CommandContext //去重的map
+	Err       Err
+	ConfigNum int               //配置的编号
+	Shard     int               //分片的编号
+	Data      map[string]string //该Shard的数据
+	ClientSeq map[int64]int     //去重的map
+}
+
+type ShardReplicaCommand struct {
+	ConfigNum int               //配置的编号
+	Shard     int               //分片的编号
+	Data      map[string]string //该Shard的数据
+	ClientSeq map[int64]int     //去重的map
+}
+
+type ConfigPushCommand struct {
+	Config shardctrler.Config
 }
