@@ -48,6 +48,8 @@ type ShardKV struct {
 	needSendShards   map[int]map[int]map[string]string //configNum -> (shard -> data)
 	needPullShards   map[int]int                       //shard -> configNum, 表示当前需要从哪个配置列表中拉取shard
 	shardsAcceptable map[int]bool                      //shard -> acceptable about this group to handle target shard
+
+	gcList map[int]int //shard -> configNum,表示可以被回收的分片以及该分片迁移时所属的配置编号
 }
 
 // ApplyNotifyMsg 可表示GetReply和PutAppendReply
@@ -210,6 +212,40 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	go kv.CloseChan(index)
 }
 
+// DataGC 回收资源
+func (kv *ShardKV) DataGC(args *PushGCSignalArgs, reply *PushGCSignalReply) {
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Success = false
+		return
+	}
+	kv.mu.Lock()
+	if _, ok := kv.needSendShards[args.ConfigNum][args.Shard]; !ok {
+		//当没有存储该数据时(也就是已经被成功回收了)
+		reply.Success = true
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+	cmd := GCCommand{args.ConfigNum, args.Shard}
+	index, term, isLeader := kv.rf.Start(cmd)
+	ch := make(chan ApplyNotifyMsg, 1)
+	kv.mu.Lock()
+	kv.replyChMap[index] = ch
+	kv.mu.Unlock()
+	select {
+	case msg := <-ch:
+		if msg.Term != term {
+			reply.Success = false
+		} else {
+			reply.Success = true
+		}
+	case <-time.After(500 * time.Millisecond):
+		reply.Success = false
+	}
+	go kv.CloseChan(index)
+}
+
 // ShardMove 分片转移
 func (kv *ShardKV) ShardMove(args *ShardMoveArgs, reply *ShardMoveReply) {
 	_, isLeader := kv.rf.GetState()
@@ -278,8 +314,9 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 	var needSendShards map[int]map[int]map[string]string
 	var needPullShards map[int]int
 	var shardsAcceptable map[int]bool
+	var gcList map[int]int
 	if d.Decode(&kvDataBase) != nil || d.Decode(&clientSeq) != nil || d.Decode(&config) != nil || d.Decode(&needSendShards) != nil ||
-		d.Decode(&needPullShards) != nil || d.Decode(&shardsAcceptable) != nil {
+		d.Decode(&needPullShards) != nil || d.Decode(&shardsAcceptable) != nil || d.Decode(&gcList) != nil {
 		DPrintf("shardkv[%d][%d]: decode error\n", kv.gid, kv.me)
 	} else {
 		kv.kvDataBase = kvDataBase
@@ -289,12 +326,46 @@ func (kv *ShardKV) readSnapshot(snapshot []byte) {
 		kv.needSendShards = needSendShards
 		kv.needPullShards = needPullShards
 		kv.shardsAcceptable = shardsAcceptable
+		kv.gcList = gcList
 	}
 }
 
 func (kv *ShardKV) getNextConfig(next int) (newConfig shardctrler.Config, ok bool) {
 	config := kv.mck.Query(next)
 	return config, config.Num == next
+}
+
+// PushGCSignal 推送部分数据可以垃圾回收的信号(当接收分片的组接收到数据后,再让发送分片的group删除掉相应的数据)
+func (kv *ShardKV) PushGCSignal() {
+	kv.mu.Lock()
+	wg := sync.WaitGroup{}
+	//当gc列表中有元素的时候
+	for shard, configNum := range kv.gcList {
+		wg.Add(1)
+		c := kv.mck.Query(configNum)
+		go func(shard int, config shardctrler.Config) {
+			defer wg.Done()
+			_, isLeader := kv.rf.GetState()
+			if !isLeader {
+				return
+			}
+			//当时负责该shard的组id
+			gId := c.Shards[shard]
+			args := PushGCSignalArgs{config.Num, shard}
+			for _, server := range config.Groups[gId] {
+				svr := kv.make_end(server)
+				reply := PushGCSignalReply{}
+				ok := svr.Call("ShardKV.DataGC", &args, &reply)
+				if ok && reply.Success {
+					//当对方成功删除掉之后,Start一条日志,让整个group都删掉回收列表中的该信息
+					kv.rf.Start(GCSuccessCommand{config.Num, shard})
+					break
+				}
+			}
+		}(shard, c)
+	}
+	kv.mu.Unlock()
+	wg.Wait()
 }
 
 func (kv *ShardKV) PullConfig() {
@@ -330,10 +401,10 @@ func (kv *ShardKV) PullShards() {
 			gId := config.Shards[shard]
 			args := ShardMoveArgs{shard, config.Num}
 			for _, server := range config.Groups[gId] {
-				srv := kv.make_end(server)
+				svr := kv.make_end(server)
 				reply := ShardMoveReply{}
 				DPrintf("shardkv[%d][%d]: 向server[%v]请求拉取configNum = [%d],shard = [%d]\n", kv.gid, kv.me, server, config.Num, shard)
-				ok := srv.Call("ShardKV.ShardMove", &args, &reply)
+				ok := svr.Call("ShardKV.ShardMove", &args, &reply)
 				DPrintf("shardkv[%d][%d]: 向server[%v]请求拉取configNum = [%d],shard = [%d]返回结果: %v\n", kv.gid, kv.me, server, config.Num, shard, reply)
 				if ok && reply.Err == OK {
 					DPrintf("shardkv[%d][%d]: 拉取成功configNum = [%d]中拉取shard = [%d]\n", kv.gid, kv.me, config.Num, shard)
@@ -453,6 +524,8 @@ func (kv *ShardKV) replicaShards(cmd ShardReplicaCommand) {
 		mergeClientReply(kv.clientSeq, cmd.ClientSeq)
 		//对该分片负责
 		kv.shardsAcceptable[cmd.Shard] = true
+		//并且将该分片以及对应的configNum标记为可被通知回收
+		kv.gcList[cmd.Shard] = cmd.ConfigNum
 		DPrintf("shardkv[%d][%d]: 成功复制了shard: %v,来自configNum: %v\n", kv.gid, kv.me, cmd.Shard, cmd.ConfigNum)
 	}
 }
@@ -463,14 +536,24 @@ func (kv *ShardKV) ApplyCommand(applyMsg raft.ApplyMsg) {
 	if applyMsg.CommandIndex <= kv.lastApplied {
 		return
 	}
-	kv.lastApplied = applyMsg.CommandIndex
-	if cmd, ok := applyMsg.Command.(ShardReplicaCommand); ok {
+	switch applyMsg.Command.(type) {
+	case ShardReplicaCommand:
+		cmd := applyMsg.Command.(ShardReplicaCommand)
 		DPrintf("shardkv[%d][%d]: 该命令为ShardReplicaCommand: %v\n", kv.gid, kv.me, cmd)
 		kv.replicaShards(cmd)
-	} else if cmd, ok := applyMsg.Command.(ConfigPushCommand); ok {
+	case ConfigPushCommand:
+		cmd := applyMsg.Command.(ConfigPushCommand)
 		DPrintf("shardkv[%d][%d]: 该命令为ConfigPushCommand: %v\n", kv.gid, kv.me, cmd)
 		kv.updateConfig(cmd.Config)
-	} else {
+	case GCCommand:
+		cmd := applyMsg.Command.(GCCommand)
+		DPrintf("shardkv[%d][%d]: 该命令为GCCommand: %v\n", kv.gid, kv.me, cmd)
+		kv.gcNeedSendShards(cmd)
+	case GCSuccessCommand:
+		cmd := applyMsg.Command.(GCSuccessCommand)
+		DPrintf("shardkv[%d][%d]: 该命令为GCCommand: %v\n", kv.gid, kv.me, cmd)
+		kv.gcSuccess(cmd)
+	default:
 		var commonReply ApplyNotifyMsg
 		op := applyMsg.Command.(Op)
 		index := applyMsg.CommandIndex
@@ -581,6 +664,11 @@ func (kv *ShardKV) createSnapshot() []byte {
 	if err != nil {
 		log.Fatalf("shardkv[%d][%d]: encode shardsAcceptable error: %v\n", kv.gid, kv.me, err)
 	}
+	//编码gcList
+	err = e.Encode(kv.gcList)
+	if err != nil {
+		log.Fatalf("shardkv[%d][%d]: encode gcList error: %v\n", kv.gid, kv.me, err)
+	}
 	snapshotData := w.Bytes()
 	return snapshotData
 }
@@ -636,6 +724,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	labgob.Register(Op{})
 	labgob.Register(ConfigPushCommand{})
 	labgob.Register(ShardReplicaCommand{})
+	labgob.Register(GCCommand{})
+	labgob.Register(GCSuccessCommand{})
 	kv := new(ShardKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
@@ -651,6 +741,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.needSendShards = make(map[int]map[int]map[string]string)
 	kv.needPullShards = make(map[int]int)
 	kv.shardsAcceptable = make(map[int]bool)
+	kv.gcList = make(map[int]int)
 	// Use something like this to talk to the shardctrler:
 	kv.mck = shardctrler.MakeClerk(kv.ctrlers)
 
@@ -661,6 +752,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.ReceiveApplyMsg()
 	go kv.Ticker(kv.PullConfig, 50)
 	go kv.Ticker(kv.PullShards, 30)
+	go kv.Ticker(kv.PushGCSignal, 50)
 	return kv
 }
 
@@ -677,5 +769,20 @@ func (kv *ShardKV) Ticker(fn func(), timeout int) {
 			fn()
 		}
 		time.Sleep(time.Duration(timeout) * time.Millisecond)
+	}
+}
+
+//垃圾回收相应的配置的分片数据
+func (kv *ShardKV) gcNeedSendShards(cmd GCCommand) {
+	if _, ok := kv.needSendShards[cmd.ConfigNum][cmd.Shard]; ok {
+		//若有该数据,则进行回收
+		delete(kv.needSendShards[cmd.ConfigNum], cmd.Shard)
+	}
+}
+
+//垃圾回收成功,从gcList中删除
+func (kv *ShardKV) gcSuccess(cmd GCSuccessCommand) {
+	if configNum, ok := kv.gcList[cmd.Shard]; ok && configNum == cmd.ConfigNum {
+		delete(kv.gcList, cmd.Shard)
 	}
 }

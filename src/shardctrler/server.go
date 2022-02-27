@@ -329,7 +329,7 @@ func (sc *ShardCtrler) ApplyQuery(op Op) (config Config) {
 	return config
 }
 
-//
+// Kill
 // the tester calls Kill() when a ShardCtrler instance won't
 // be needed again. you are not required to do anything
 // in Kill(), but it might be convenient to (for example)
@@ -340,7 +340,7 @@ func (sc *ShardCtrler) Kill() {
 	// Your code here, if desired.
 }
 
-// needed by shardkv tester
+// Raft needed by shardkv tester
 func (sc *ShardCtrler) Raft() *raft.Raft {
 	return sc.rf
 }
@@ -382,7 +382,7 @@ func (sc *ShardCtrler) ApplySnapshot(msg raft.ApplyMsg) {
 
 }
 
-//
+// StartServer
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
 // form the fault-tolerant shardctrler service.

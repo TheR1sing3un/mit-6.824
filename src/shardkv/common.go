@@ -14,7 +14,7 @@ import (
 // You will have to modify these definitions.
 //
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -91,6 +91,25 @@ type ShardReplicaCommand struct {
 	ClientSeq map[int64]RequestResult //去重的map
 }
 
+type GCSuccessCommand struct {
+	ConfigNum int
+	Shard     int
+}
+
+type GCCommand struct {
+	ConfigNum int
+	Shard     int
+}
+
 type ConfigPushCommand struct {
 	Config shardctrler.Config
+}
+
+type PushGCSignalArgs struct {
+	ConfigNum int //需要回收的配置编号
+	Shard     int //需要回收的分片的配置编号
+}
+
+type PushGCSignalReply struct {
+	Success bool //是否成功回收相应的数据
 }
