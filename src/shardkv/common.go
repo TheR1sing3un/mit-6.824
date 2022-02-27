@@ -78,17 +78,17 @@ type ShardMoveArgs struct {
 
 type ShardMoveReply struct {
 	Err       Err
-	ConfigNum int               //配置的编号
-	Shard     int               //分片的编号
-	Data      map[string]string //该Shard的数据
-	ClientSeq map[int64]int     //去重的map
+	ConfigNum int                     //配置的编号
+	Shard     int                     //分片的编号
+	Data      map[string]string       //该Shard的数据
+	ClientSeq map[int64]RequestResult //去重的map
 }
 
 type ShardReplicaCommand struct {
-	ConfigNum int               //配置的编号
-	Shard     int               //分片的编号
-	Data      map[string]string //该Shard的数据
-	ClientSeq map[int64]int     //去重的map
+	ConfigNum int                     //配置的编号
+	Shard     int                     //分片的编号
+	Data      map[string]string       //该Shard的数据
+	ClientSeq map[int64]RequestResult //去重的map
 }
 
 type ConfigPushCommand struct {
