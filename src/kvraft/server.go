@@ -38,11 +38,12 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	clientReply    map[int64]CommandContext    //客户端的唯一指令和响应的对应map
+	clientReply    map[int64]RequestResult     //客户端的唯一指令和响应的对应map
 	kvDataBase     KvDataBase                  //数据库,可自行定义和更换
 	storeInterface store                       //数据库接口
 	replyChMap     map[int]chan ApplyNotifyMsg //某index的响应的chan
 	lastApplied    int                         //上一条应用的log的index,防止快照导致回退
+	readCon        map[int]*sync.Cond          //读请求记录的ReadIndex和对应Cond,多个请求若是同一个ReadIndex则可以公用Cond
 }
 
 // ApplyNotifyMsg 可表示GetReply和PutAppendReply
@@ -54,66 +55,68 @@ type ApplyNotifyMsg struct {
 	Term int
 }
 
-type CommandContext struct {
-	Command int            //该client的目前的commandId
-	Reply   ApplyNotifyMsg //该command的响应
+type RequestResult struct {
+	RequestId int    //为了去重
+	Err       Err    //读请求时需要返回的err(因为读请求可能为ErrNoKey)
+	Value     string //读到的值(Append和Put的历史请求直接返回OK即可,但是读请求需要返回历史请求结果)
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	//defer kv.mu.Unlock()
 	defer func() {
 		DPrintf("kvserver[%d]: 返回Get RPC请求,args=[%v];Reply=[%v]\n", kv.me, args, reply)
 	}()
 	DPrintf("kvserver[%d]: 接收Get RPC请求,args=[%v]\n", kv.me, args)
 	//1.先判断该命令是否已经被执行过了
-	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
-		if commandContext.Command >= args.CommandId {
+	if request, ok := kv.clientReply[args.ClientId]; ok {
+		if request.RequestId >= args.CommandId {
 			//若当前的请求已经被执行过了,那么直接返回结果
-			reply.Err = commandContext.Reply.Err
-			reply.Value = commandContext.Reply.Value
+			reply.Err = request.Err
+			reply.Value = request.Value
+			DPrintf("kvserver[%d]: 该Get RPC请求为历史请求,args=[%v],reply=[%v]\n", kv.me, args, reply)
 			kv.mu.Unlock()
 			return
 		}
 	}
 	kv.mu.Unlock()
-	//2.若命令未被执行,那么开始生成Op并传递给raft
-	op := Op{
-		CommandType: GetMethod,
-		Key:         args.Key,
-		ClientId:    args.ClientId,
-		CommandId:   args.CommandId,
-	}
-	index, term, isLeader := kv.rf.Start(op)
-	//3.若不为leader则直接返回Err
-	if !isLeader {
+	//2.发送一轮心跳来检查自己是否还是Leader
+	if !kv.rf.CheckIsLeader() {
+		//不为Leader则返回
 		reply.Err = ErrWrongLeader
-		//kv.mu.Unlock()
 		return
 	}
-	replyCh := make(chan ApplyNotifyMsg, 1)
+	//3.当前仍为Leader,取当前的commitIndex(一定可以取到和节点term相同的log的commitIndex,由Raft的该方法自行保证)
+	readIndex := kv.rf.GetCommitIndex()
+	DPrintf("kvserver[%d]:获取ReadIndex: %d\n", kv.me, readIndex)
+	//等待该readIndex被应用到状态机
 	kv.mu.Lock()
-	kv.replyChMap[index] = replyCh
-	DPrintf("kvserver[%d]: 创建reply通道:index=[%d]\n", kv.me, index)
-	kv.mu.Unlock()
-	//4.等待应用后返回消息
-	select {
-	case replyMsg := <-replyCh:
-		//当被通知时,返回结果
-		DPrintf("kvserver[%d]: 获取到通知结果,index=[%d],replyMsg: %v\n", kv.me, index, replyMsg)
-		if term == replyMsg.Term {
-			reply.Err = replyMsg.Err
-			reply.Value = replyMsg.Value
-		} else {
-			reply.Err = ErrWrongLeader
-		}
-	case <-time.After(500 * time.Millisecond):
-		DPrintf("kvserver[%d]: 处理请求超时: %v\n", kv.me, op)
-		reply.Err = ErrTimeout
+	var cond *sync.Cond
+	if c, ok := kv.readCon[readIndex]; !ok {
+		//若没有该readIndex的con,则新建一个
+		lock := &sync.Mutex{}
+		cond = sync.NewCond(lock)
+		kv.readCon[readIndex] = cond
+	} else {
+		cond = c
 	}
-	//5.清除chan
-	go kv.CloseChan(index)
+	DPrintf("kvserver[%d]: 开始等待ReadIndex: %d,args=[%v]\n", kv.me, readIndex, args)
+	kv.mu.Unlock()
+	//在该cond上等待
+	cond.L.Lock()
+	cond.Wait()
+	cond.L.Unlock()
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	//执行读请求
+	if value, ok := kv.storeInterface.Get(args.Key); !ok {
+		reply.Err = ErrNoKey
+	} else {
+		reply.Err = OK
+		reply.Value = value
+	}
+	//更新clientReply
+	kv.clientReply[args.ClientId] = RequestResult{args.CommandId, reply.Err, reply.Value}
 }
 
 func (kv *KVServer) CloseChan(index int) {
@@ -140,12 +143,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}()
 	DPrintf("kvserver[%d]: 接收PutAppend RPC请求,args=[%v]\n", kv.me, args)
 	//1.先判断该命令是否已经被执行过了
-	if commandContext, ok := kv.clientReply[args.ClientId]; ok {
+	if request, ok := kv.clientReply[args.ClientId]; ok {
 		//若该命令已被执行了,直接返回刚刚返回的结果
-		if commandContext.Command == args.CommandId {
+		if request.RequestId == args.CommandId {
 			//若当前的请求已经被执行过了,那么直接返回结果
-			reply.Err = commandContext.Reply.Err
-			DPrintf("kvserver[%d]: CommandId=[%d]==CommandContext.CommandId=[%d] ,直接返回: %v\n", kv.me, args.CommandId, commandContext.Command, reply)
+			reply.Err = request.Err
+			DPrintf("kvserver[%d]: CommandId=[%d]==CommandContext,直接返回: %v\n", kv.me, args.CommandId, reply)
 			kv.mu.Unlock()
 			return
 		}
@@ -194,7 +197,7 @@ func (kv *KVServer) ReceiveApplyMsg() {
 			DPrintf("kvserver[%d]: 获取到applyCh中新的applyMsg=[%v]\n", kv.me, applyMsg)
 			//当为合法命令时
 			if applyMsg.CommandValid {
-				kv.ApplyCommand(applyMsg)
+				kv.applyCommand(applyMsg)
 			} else if applyMsg.SnapshotValid {
 				//当为合法快照时
 				kv.ApplySnapshot(applyMsg)
@@ -206,49 +209,68 @@ func (kv *KVServer) ReceiveApplyMsg() {
 	}
 }
 
-func (kv *KVServer) ApplyCommand(applyMsg raft.ApplyMsg) {
+func (kv *KVServer) checkReadIndex() {
+	for !kv.killed() {
+		//检查是否有可以返回的readIndex了
+		kv.mu.Lock()
+		for readIndex, cond := range kv.readCon {
+			if readIndex <= kv.lastApplied {
+				cond.Broadcast()
+			}
+		}
+		kv.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (kv *KVServer) applyCommand(applyMsg raft.ApplyMsg) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	var commonReply ApplyNotifyMsg
-	op := applyMsg.Command.(Op)
 	index := applyMsg.CommandIndex
-	//当命令已经被应用过了
-	if commandContext, ok := kv.clientReply[op.ClientId]; ok && commandContext.Command >= op.CommandId {
-		DPrintf("kvserver[%d]: 该命令已被应用过,applyMsg: %v, commandContext: %v\n", kv.me, applyMsg, commandContext)
-		commonReply = commandContext.Reply
+	if index <= kv.lastApplied {
 		return
 	}
-	//当命令未被应用过
-	if op.CommandType == GetMethod {
-		//Get请求时
-		if value, ok := kv.storeInterface.Get(op.Key); ok {
-			//有该数据时
-			commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
-		} else {
-			//当没有数据时
-			commonReply = ApplyNotifyMsg{ErrNoKey, value, applyMsg.CommandTerm}
+	kv.lastApplied = index
+	if applyMsg.Command != nil {
+		op := applyMsg.Command.(Op)
+		//当命令已经被应用过了
+		if request, ok := kv.clientReply[op.ClientId]; ok && request.RequestId >= op.CommandId {
+			DPrintf("kvserver[%d]: 该命令已被应用过,applyMsg: %v, requestReply: %v\n", kv.me, applyMsg, request)
+			commonReply.Err = request.Err
+			commonReply.Value = request.Value
+			commonReply.Term = applyMsg.CommandTerm
+			return
 		}
-	} else if op.CommandType == PutMethod {
-		//Put请求时
-		value := kv.storeInterface.Put(op.Key, op.Value)
-		commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
-	} else if op.CommandType == AppendMethod {
-		//Append请求时
-		newValue := kv.storeInterface.Append(op.Key, op.Value)
-		commonReply = ApplyNotifyMsg{OK, newValue, applyMsg.CommandTerm}
+		//当命令未被应用过
+		if op.CommandType == GetMethod {
+			//Get请求时
+			if value, ok := kv.storeInterface.Get(op.Key); ok {
+				//有该数据时
+				commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
+			} else {
+				//当没有数据时
+				commonReply = ApplyNotifyMsg{ErrNoKey, value, applyMsg.CommandTerm}
+			}
+		} else if op.CommandType == PutMethod {
+			//Put请求时
+			value := kv.storeInterface.Put(op.Key, op.Value)
+			commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
+		} else if op.CommandType == AppendMethod {
+			//Append请求时
+			newValue := kv.storeInterface.Append(op.Key, op.Value)
+			commonReply = ApplyNotifyMsg{OK, newValue, applyMsg.CommandTerm}
+		}
+		//通知handler去响应请求
+		if replyCh, ok := kv.replyChMap[index]; ok {
+			replyCh <- commonReply
+		}
+		value, _ := kv.storeInterface.Get(op.Key)
+		DPrintf("kvserver[%d]: 此时key=[%v],value=[%v]\n", kv.me, op.Key, value)
+		//更新clientReply
+		kv.clientReply[op.ClientId] = RequestResult{op.CommandId, commonReply.Err, commonReply.Value}
+		DPrintf("kvserver[%d]: 更新ClientId=[%d],CommandId=[%d],Reply=[%v]\n", kv.me, op.ClientId, op.CommandId, commonReply)
 	}
-	//通知handler去响应请求
-	if replyCh, ok := kv.replyChMap[index]; ok {
-		DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知index = [%d]的channel\n", kv.me, applyMsg, index)
-		replyCh <- commonReply
-		DPrintf("kvserver[%d]: applyMsg: %v处理完成,通知完成index = [%d]的channel\n", kv.me, applyMsg, index)
-	}
-	value, _ := kv.storeInterface.Get(op.Key)
-	DPrintf("kvserver[%d]: 此时key=[%v],value=[%v]\n", kv.me, op.Key, value)
-	//更新clientReply
-	kv.clientReply[op.ClientId] = CommandContext{op.CommandId, commonReply}
-	DPrintf("kvserver[%d]: 更新ClientId=[%d],CommandId=[%d],Reply=[%v]\n", kv.me, op.ClientId, op.CommandId, commonReply)
-	kv.lastApplied = applyMsg.CommandIndex
 	//判断是否需要快照
 	if kv.needSnapshot() {
 		kv.startSnapshot(applyMsg.CommandIndex)
@@ -358,13 +380,15 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	// You may need initialization code here.
-	kv.clientReply = make(map[int64]CommandContext)
+	kv.clientReply = make(map[int64]RequestResult)
 	kv.kvDataBase = KvDataBase{make(map[string]string)}
 	kv.storeInterface = &kv.kvDataBase
 	kv.replyChMap = make(map[int]chan ApplyNotifyMsg)
+	kv.readCon = make(map[int]*sync.Cond)
 	//从快照中恢复数据
 	kv.readSnapshot(kv.rf.GetSnapshot())
 	go kv.ReceiveApplyMsg()
+	go kv.checkReadIndex()
 	return kv
 }
 
@@ -375,7 +399,7 @@ func (kv *KVServer) readSnapshot(snapshot []byte) {
 	r := bytes.NewBuffer(snapshot)
 	d := labgob.NewDecoder(r)
 	var kvDataBase KvDataBase
-	var clientReply map[int64]CommandContext
+	var clientReply map[int64]RequestResult
 	if d.Decode(&kvDataBase) != nil || d.Decode(&clientReply) != nil {
 		DPrintf("kvserver[%d]: decode error\n", kv.me)
 	} else {

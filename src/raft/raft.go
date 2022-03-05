@@ -516,14 +516,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// term一样啥也不用做，继续向后比对Log
 		}
 	}
-
-	//firstIndex := rf.logEntries[0].Index
-	//for index, entry := range args.Entries {
-	//	if entry.Index-firstIndex >= len(rf.logEntries) || rf.logEntries[entry.Index-firstIndex].Term != entry.Term {
-	//		rf.logEntries = append(rf.logEntries[:entry.Index-firstIndex], args.Entries[index:]...)
-	//		break
-	//	}
-	//}
 	if len(args.Entries) > 0 {
 		DPrintf("id[%d].state[%v].term[%d]: 追加后的的log=[%v]\n", rf.me, rf.state, rf.currentTerm, rf.logEntries)
 	}
@@ -680,8 +672,37 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return index, term, isLeader
 }
 
-// UpdateCommitIndex 检查更新commitIndex
-func (rf *Raft) UpdateCommitIndex() {
+// CheckIsLeader 检查当前是否仍是leader
+func (rf *Raft) CheckIsLeader() (isLeader bool) {
+	//发送一轮广播
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	defer func() {
+		DPrintf("id[%d].state[%v].term[%d]: 检查目前是否为Leader: %v\n", rf.me, rf.state, rf.currentTerm, isLeader)
+	}()
+	DPrintf("id[%d].state[%v].term[%d]: 开始检查自己是否为leader\n", rf.me, rf.state, rf.currentTerm)
+	if rf.state != LEADER {
+		return false
+	}
+	cond := sync.NewCond(&rf.mu)
+	go rf.BoardCastOneRound(cond)
+	cond.Wait()
+	return rf.state == LEADER
+}
+
+// GetCommitIndex 返回最新的commitIndex
+func (rf *Raft) GetCommitIndex() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for rf.index(rf.commitIndex).Term != rf.currentTerm {
+		rf.applyCond.Wait()
+	}
+	DPrintf("id[%d].state[%v].term[%d]: 当前的commitIndex: %d\n", rf.me, rf.state, rf.currentTerm, rf.commitIndex)
+	return rf.commitIndex
+}
+
+// updateCommitIndex 检查更新commitIndex
+func (rf *Raft) updateCommitIndex() {
 	for !rf.killed() {
 		time.Sleep(5 * time.Millisecond)
 		rf.mu.Lock()
@@ -707,7 +728,7 @@ func (rf *Raft) UpdateCommitIndex() {
 				rf.commitIndex = i
 				DPrintf("id[%d].state[%v].term[%d]: n = %d, 过半节点的matchIndex >= n而且log[n].Term == currentTerm,则更新commitIndex = %d\n", rf.me, rf.state, rf.currentTerm, i, i)
 				//唤醒ApplyCommand routine
-				rf.applyCond.Signal()
+				rf.applyCond.Broadcast()
 				break
 			}
 		}
@@ -800,7 +821,7 @@ func (rf *Raft) startElection() {
 					if reply.VoteGranted {
 						voteNums++
 						if voteNums > len(rf.peers)/2 {
-							go rf.ToLeader()
+							go rf.toLeader()
 						}
 					}
 				} else if reply.Term > rf.currentTerm {
@@ -898,8 +919,8 @@ func Max(a int, b int) int {
 	return b
 }
 
-// ToLeader 转变为leader
-func (rf *Raft) ToLeader() {
+// toLeader 转变为leader
+func (rf *Raft) toLeader() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	DPrintf("id[%d].state[%v].term[%d]: 成为Leader\n", rf.me, rf.state, rf.currentTerm)
@@ -913,7 +934,9 @@ func (rf *Raft) ToLeader() {
 	}
 	//初始化matchIndex为0(实例化的时候已经赋值0了,不需要自己再赋值一次了)
 	//当为leader时,开始启动协程来实时更新commitIndex
-	go rf.UpdateCommitIndex()
+	go rf.updateCommitIndex()
+	//追加一条空日志,用于更新到最新的commitIndex
+	go rf.Start(nil)
 	//立马开始一轮心跳
 	rf.timerHeartBeat.Reset(0)
 }
@@ -946,14 +969,39 @@ func (rf *Raft) BoardCast() {
 		DPrintf("id[%d].state[%v].term[%d]: 开始一轮广播\n", rf.me, rf.state, rf.currentTerm)
 		for i := range rf.peers {
 			if i != rf.me {
-				go rf.HandleAppendEntries(i)
+				go rf.HandleAppendEntries(i, nil)
 			}
 		}
 	}
 }
 
+// BoardCastOneRound 发起广播发送AppendEntries RPC
+func (rf *Raft) BoardCastOneRound(cond *sync.Cond) {
+	rf.mu.Lock()
+	wg := &sync.WaitGroup{}
+	if rf.state == LEADER {
+		DPrintf("id[%d].state[%v].term[%d]: 开始一轮广播\n", rf.me, rf.state, rf.currentTerm)
+		for i := range rf.peers {
+			if i != rf.me {
+				wg.Add(1)
+				go rf.HandleAppendEntries(i, wg)
+			}
+		}
+	}
+	rf.mu.Unlock()
+	//等待所有的返回
+	wg.Wait()
+	//广播完,通知正在等待的CheckIsLeader协程
+	if cond != nil {
+		cond.Signal()
+	}
+}
+
 // HandleAppendEntries handle对AppendEntries的发送和返回处理
-func (rf *Raft) HandleAppendEntries(server int) {
+func (rf *Raft) HandleAppendEntries(server int, wg *sync.WaitGroup) {
+	if wg != nil {
+		defer wg.Done()
+	}
 	rf.mu.Lock()
 	if rf.state != LEADER {
 		rf.mu.Unlock()
