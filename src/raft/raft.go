@@ -548,7 +548,7 @@ func (rf *Raft) updateCommitIndexForFollower(leaderCommit int) {
 			DPrintf("id[%d].state[%v].term[%d]: 重置commitIndex为leaderCommit[%d]\n", rf.me, rf.state, rf.currentTerm, rf.commitIndex)
 		}
 	}
-	rf.applyCond.Signal()
+	rf.applyCond.Broadcast()
 }
 
 //二分查找目标term的第一个log的index(寻找左边界)
@@ -664,7 +664,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.index(index).Term
 		rf.mu.Unlock()
 		//立马进行一次广播
-		go rf.BoardCast()
+		go rf.Broadcast()
 		return index, term, true
 	}
 	rf.mu.Unlock()
@@ -685,9 +685,11 @@ func (rf *Raft) CheckIsLeader() (isLeader bool) {
 		return false
 	}
 	cond := sync.NewCond(&rf.mu)
-	go rf.BoardCastOneRound(cond)
+	ch := make(chan bool, 1)
+	go rf.BroadcastOneRound(cond, ch)
 	cond.Wait()
-	return rf.state == LEADER
+	DPrintf("id[%d].state[%v].term[%d]: 检查Leader协程被唤醒: %v\n", rf.me, rf.state, rf.currentTerm, isLeader)
+	return <-ch
 }
 
 // GetCommitIndex 返回最新的commitIndex
@@ -787,7 +789,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			if rf.state == LEADER {
 				//当心跳计时器到时间后,如果是Leader就开启心跳检测
-				go rf.BoardCast()
+				go rf.Broadcast()
 			}
 			//重置心跳计时器
 			rf.timerHeartBeat.Reset(time.Duration(rf.timeoutHeartBeat) * time.Millisecond)
@@ -961,30 +963,39 @@ func (rf *Raft) toCandidate() {
 	DPrintf("id[%d].state[%v].term[%d]: 变成Candidate\n", rf.me, rf.state, rf.currentTerm)
 }
 
-// BoardCast 发起广播发送AppendEntries RPC
-func (rf *Raft) BoardCast() {
+// Broadcast 发起广播发送AppendEntries RPC
+func (rf *Raft) Broadcast() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.state == LEADER {
 		DPrintf("id[%d].state[%v].term[%d]: 开始一轮广播\n", rf.me, rf.state, rf.currentTerm)
 		for i := range rf.peers {
 			if i != rf.me {
-				go rf.HandleAppendEntries(i, nil)
+				go rf.HandleAppendEntries(i)
 			}
 		}
 	}
 }
 
-// BoardCastOneRound 发起广播发送AppendEntries RPC
-func (rf *Raft) BoardCastOneRound(cond *sync.Cond) {
+// BroadcastOneRound 发起广播发送AppendEntries RPC
+func (rf *Raft) BroadcastOneRound(cond *sync.Cond, ch chan bool) {
 	rf.mu.Lock()
 	wg := &sync.WaitGroup{}
+	var successNums int64
+	successNums = 1
 	if rf.state == LEADER {
-		DPrintf("id[%d].state[%v].term[%d]: 开始一轮广播\n", rf.me, rf.state, rf.currentTerm)
+		DPrintf("id[%d].state[%v].term[%d]: 开始一轮检验leader广播\n", rf.me, rf.state, rf.currentTerm)
 		for i := range rf.peers {
 			if i != rf.me {
 				wg.Add(1)
-				go rf.HandleAppendEntries(i, wg)
+				go func(server int) {
+					DPrintf("server = %v\n", server)
+					if rf.HandleAppendEntries(server) {
+						atomic.AddInt64(&successNums, 1)
+						DPrintf("id[%d].state[%v].term[%d]: 节点%v 同意本节点仍为leader\n", rf.me, rf.state, rf.currentTerm, server)
+					}
+					wg.Done()
+				}(i)
 			}
 		}
 	}
@@ -993,15 +1004,15 @@ func (rf *Raft) BoardCastOneRound(cond *sync.Cond) {
 	wg.Wait()
 	//广播完,通知正在等待的CheckIsLeader协程
 	if cond != nil {
+		DPrintf("id[%d].state[%v].term[%d]: 通知checkIsLeader协程,successNums: %v\n", rf.me, rf.state, rf.currentTerm, successNums)
 		cond.Signal()
+		ch <- successNums > int64(len(rf.peers)/2)
 	}
 }
 
-// HandleAppendEntries handle对AppendEntries的发送和返回处理
-func (rf *Raft) HandleAppendEntries(server int, wg *sync.WaitGroup) {
-	if wg != nil {
-		defer wg.Done()
-	}
+// HandleAppendEntries handle对AppendEntries的发送和返回处理(这里返回值表示这次请求目标follower是否仍认为自己是leader)
+func (rf *Raft) HandleAppendEntries(server int) (success bool) {
+	success = false
 	rf.mu.Lock()
 	if rf.state != LEADER {
 		rf.mu.Unlock()
@@ -1040,6 +1051,7 @@ func (rf *Raft) HandleAppendEntries(server int, wg *sync.WaitGroup) {
 			DPrintf("id[%d].state[%v].term[%d]: 发送installSnapshot to [%d] 过期,转变为follower\n", rf.me, rf.state, rf.currentTerm, server)
 			return
 		}
+		success = true
 		//若安装成功,则更新nextIndex和matchIndex
 		rf.matchIndex[server] = args.LastIncludedIndex
 		rf.nextIndex[server] = rf.matchIndex[server] + 1
@@ -1083,6 +1095,8 @@ func (rf *Raft) HandleAppendEntries(server int, wg *sync.WaitGroup) {
 		DPrintf("id[%d].state[%v].term[%d]: 发送ae to [%d] 过期,转变为follower\n", rf.me, rf.state, rf.currentTerm, server)
 		return
 	}
+	DPrintf("id[%d].state[%v].term[%d]: follower仍认为自己是leader\n", rf.me, rf.state, rf.currentTerm, server)
+	success = true
 	//若返回失败
 	if !reply.Success {
 		//更新nextIndex
@@ -1105,39 +1119,5 @@ func (rf *Raft) HandleAppendEntries(server int, wg *sync.WaitGroup) {
 	if len(args.Entries) > 0 {
 		DPrintf("id[%d].state[%v].term[%d]: 追加日志到server[%d]成功,更新nextIndex->[%d],matchIndex->[%d]\n", rf.me, rf.state, rf.currentTerm, server, rf.nextIndex[server], rf.matchIndex[server])
 	}
-}
-
-func (rf *Raft) HandleInstallSnapshot(server int) {
-	rf.mu.Lock()
-	//已经不为leader,直接结束
-	if rf.state != LEADER {
-		rf.mu.Unlock()
-		return
-	}
-	args := InstallSnapshotArgs{
-		Term:              rf.currentTerm,
-		LeaderId:          rf.me,
-		LastIncludedIndex: rf.logEntries[0].Index,
-		LastIncludedTerm:  rf.logEntries[0].Term,
-		Data:              rf.snapshotData,
-	}
-	reply := InstallSnapshotReply{}
-	rf.mu.Unlock()
-	ok := rf.sendInstallSnapshot(server, &args, &reply)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	//过期的请求直接结束
-	if rf.state != LEADER || args.Term != rf.currentTerm {
-		return
-	}
-	if !ok {
-		DPrintf("id[%d].state[%v].term[%d]: 发送installSnapshot to [%d] error\n", rf.me, rf.state, rf.currentTerm, server)
-		return
-	}
-	if reply.Term > rf.currentTerm {
-		rf.currentTerm = reply.Term
-		rf.toFollower()
-		rf.voteFor = -1
-		DPrintf("id[%d].state[%v].term[%d]: 发送installSnapshot to [%d] 过期,转变为follower\n", rf.me, rf.state, rf.currentTerm, server)
-	}
+	return
 }

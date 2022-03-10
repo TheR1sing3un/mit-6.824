@@ -215,6 +215,7 @@ func (kv *KVServer) checkReadIndex() {
 		kv.mu.Lock()
 		for readIndex, cond := range kv.readCon {
 			if readIndex <= kv.lastApplied {
+				DPrintf("kvserver[%d]: 检查到ReadIndex: %v,lastApplied: %v,因为通知更新返回get结果\n", kv.me, readIndex, kv.lastApplied)
 				cond.Broadcast()
 			}
 		}
@@ -243,16 +244,7 @@ func (kv *KVServer) applyCommand(applyMsg raft.ApplyMsg) {
 			return
 		}
 		//当命令未被应用过
-		if op.CommandType == GetMethod {
-			//Get请求时
-			if value, ok := kv.storeInterface.Get(op.Key); ok {
-				//有该数据时
-				commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
-			} else {
-				//当没有数据时
-				commonReply = ApplyNotifyMsg{ErrNoKey, value, applyMsg.CommandTerm}
-			}
-		} else if op.CommandType == PutMethod {
+		if op.CommandType == PutMethod {
 			//Put请求时
 			value := kv.storeInterface.Put(op.Key, op.Value)
 			commonReply = ApplyNotifyMsg{OK, value, applyMsg.CommandTerm}
