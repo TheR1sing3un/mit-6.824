@@ -361,6 +361,7 @@ func (kv *ShardKV) PushGCSignal() {
 					kv.rf.Start(GCSuccessCommand{config.Num, shard})
 					break
 				}
+				DPrintf("error push gc signal")
 			}
 		}(shard, c)
 	}
@@ -549,6 +550,9 @@ func (kv *ShardKV) ApplyCommand(applyMsg raft.ApplyMsg) {
 		cmd := applyMsg.Command.(GCCommand)
 		DPrintf("shardkv[%d][%d]: 该命令为GCCommand: %v\n", kv.gid, kv.me, cmd)
 		kv.gcNeedSendShards(cmd)
+		if replyCh, ok := kv.replyChMap[applyMsg.CommandIndex]; ok {
+			replyCh <- ApplyNotifyMsg{OK, "", applyMsg.CommandTerm}
+		}
 	case GCSuccessCommand:
 		cmd := applyMsg.Command.(GCSuccessCommand)
 		DPrintf("shardkv[%d][%d]: 该命令为GCCommand: %v\n", kv.gid, kv.me, cmd)
