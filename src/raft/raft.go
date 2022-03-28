@@ -857,7 +857,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.voteFor = -1
 	rf.logEntries = make([]LogEntry, 0)
-	rf.logEntries = append(rf.logEntries, LogEntry{-1, -1, 0})
+	rf.logEntries = append(rf.logEntries, LogEntry{-1, 0, -1})
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.state = FOLLOWER
